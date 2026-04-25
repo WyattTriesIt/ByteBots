@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ByteBots Studio</title>
+    <style>
+        :root { --accent: #00ff88; --bg-dark: #111; --panel-bg: #222; --border: #333; --play-accent: #ff4444; }
+        body { margin: 0; background: var(--bg-dark); overflow: hidden; font-family: 'Segoe UI', sans-serif; color: white; }
+        
+        /* UI Overlays */
+        #top-bar { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 50px;
+            background: var(--panel-bg); display: flex; align-items: center; padding: 0 15px;
+            border-bottom: 2px solid var(--border); z-index: 100; gap: 10px; box-sizing: border-box;
+        }
+
+        .tool-btn {
+            background: #444; color: white; border: none; padding: 5px 12px;
+            border-radius: 4px; cursor: pointer; font-weight: bold; transition: 0.2s;
+        }
+        .tool-btn:hover { background: #666; }
+        .active-tool { background: var(--accent) !important; color: #111 !important; }
+
+        /* Play Button Special Style */
+        #btn-playtest {
+            background: #2d5a3f;
+            border: 1px solid var(--accent);
+            margin-left: auto; /* Pushes to the right */
+        }
+        #btn-playtest:hover { background: #3a7551; }
+        
+        /* Visual cue for when testing is active */
+        .testing-active #top-bar { border-bottom: 2px solid var(--play-accent); }
+
+        .tab-btn {
+            background: transparent; color: #888; border: none; padding: 0 20px;
+            cursor: pointer; font-weight: bold; height: 100%; transition: 0.2s;
+            border-bottom: 3px solid transparent;
+        }
+        .tab-btn.active-tab { color: var(--accent); border-bottom: 3px solid var(--accent); }
+
+        #right-sidebar { 
+            position: absolute; right: 0; top: 50px; width: 220px; height: calc(100% - 50px); 
+            background: var(--panel-bg); border-left: 2px solid var(--border); 
+            display: flex; flex-direction: column; z-index: 1000; 
+        }
+
+        .sidebar-section { flex: 1; display: flex; flex-direction: column; overflow: hidden; border-bottom: 1px solid var(--border); }
+        .sidebar-h3 { margin: 0; padding: 10px; font-size: 14px; background: #2a2a2a; color: var(--accent); }
+        
+        .prop-group { margin-bottom: 10px; }
+        .prop-label { font-size: 11px; color: #888; display: block; margin-bottom: 4px; }
+        .prop-input { width: 100%; background: #111; border: 1px solid #444; color: white; padding: 4px; box-sizing: border-box; }
+        .num-row { display: flex; gap: 5px; }
+        .num-row input { width: 30%; }
+
+        #ui-info { position: absolute; bottom: 20px; left: 20px; color: #888; pointer-events: none; font-size: 12px; }
+
+        /* --- NEW EXPLORER TREE STYLES --- */
+        .explorer-item {
+            display: flex;
+            align-items: center;
+            padding: 4px 5px;
+            cursor: pointer;
+            border-radius: 3px;
+            user-select: none;
+            gap: 5px;
+            transition: background 0.1s;
+        }
+        .explorer-item:hover { background: #333; }
+        .explorer-item.selected { background: #444; border-left: 2px solid var(--accent); }
+
+        .exp-arrow { width: 12px; height: 12px; display: inline-block; text-align: center; font-size: 10px; transition: 0.2s; color: #888; }
+        .exp-arrow.open { transform: rotate(90deg); }
+
+        .exp-plus {
+            margin-left: auto;
+            color: var(--accent);
+            font-weight: bold;
+            font-size: 16px;
+            padding: 0 5px;
+            opacity: 0;
+            line-height: 1;
+        }
+        .explorer-item:hover .exp-plus { opacity: 1; }
+
+        .exp-children { margin-left: 10px; padding-left: 5px; border-left: 1px solid #333; }
+
+        /* --- NEW CONTEXT MENU STYLES --- */
+        #explorer-menu {
+            position: fixed;
+            background: #222;
+            border: 1px solid #444;
+            padding: 5px 0;
+            z-index: 2000;
+            display: none;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            border-radius: 4px;
+            min-width: 120px;
+        }
+        .menu-item { padding: 8px 15px; cursor: pointer; font-size: 12px; color: #ddd; }
+        .menu-item:hover { background: var(--accent); color: #111; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div id="top-bar">
+    <div class="tabs" style="height: 100%;">
+        <button class="tab-btn active-tab" id="tab-btn-game">Game</button>
+        <button class="tab-btn" id="tab-btn-model">Model</button>
+    </div>
+
+    <div id="controls-game" class="tool-group" style="display: flex; align-items: center; gap: 10px;">
+        <button class="tool-btn active-tool" id="mode-select">Select</button>
+        <button class="tool-btn" id="mode-move">Move</button>
+        <button class="tool-btn" id="mode-scale">Scale</button>
+        <button class="tool-btn" id="mode-rotate">Rotate</button>
+        <div style="width:1px; height:20px; background:#444;"></div>
+        <select id="shape-selector" class="prop-input" style="width: auto;">
+            <option value="cube">Part</option>
+            <option value="sphere">Sphere</option>
+            <option value="cylinder">Cylinder</option>
+        </select>
+        <button class="tool-btn" id="add-shape">Add</button>
+    </div>
+
+    <div id="controls-model" class="tool-group" style="display: none; align-items: center; gap: 10px;">
+        <button class="tool-btn" id="mode-select-m">Select</button>
+        <button class="tool-btn" id="mode-move-m">Move</button>
+        <button class="tool-btn" id="mode-scale-m">Scale</button>
+        <button class="tool-btn" id="mode-rotate-m">Rotate</button>
+        <div style="width:1px; height:20px; background:#444;"></div>
+        <select id="shape-selector-m" class="prop-input" style="width: auto;">
+            <option value="cube">Part</option>
+            <option value="sphere">Sphere</option>
+            <option value="cylinder">Cylinder</option>
+        </select>
+        <button class="tool-btn" id="add-shape-m">Add</button>
+        <label style="font-size: 12px; color: #888;">Snap:</label>
+        <input type="number" id="snap-amount" value="1" step="0.1" style="width: 45px;" class="prop-input">
+    </div>
+
+    <button class="tool-btn" id="btn-playtest">Play Test</button>
+</div>
+
+<div id="right-sidebar">
+    <div class="sidebar-section">
+        <h3 class="sidebar-h3">Explorer</h3>
+        <div id="explorer-list" style="flex: 1; overflow-y: auto; padding: 5px; font-size: 13px;"></div>
+    </div>
+
+    <div class="sidebar-section" style="padding: 10px;">
+        <h3 class="sidebar-h3" style="background: none; padding: 0 0 10px 0;">Properties</h3>
+        <div id="property-controls" style="display: none; flex-direction: column; gap: 12px; overflow-y: auto;">
+            <div class="prop-group">
+                <label class="prop-label">Name</label>
+                <input type="text" id="prop-name" class="prop-input">
+            </div>
+            <div class="prop-group">
+                <label class="prop-label">Color</label>
+                <input type="color" id="prop-color" style="width: 100%; height: 25px; border: none; background: none; cursor: pointer;">
+            </div>
+            <div class="prop-group">
+                <label class="prop-label">Position</label>
+                <div class="num-row">
+                    <input type="number" id="prop-pos-x" step="0.1" class="prop-input">
+                    <input type="number" id="prop-pos-y" step="0.1" class="prop-input">
+                    <input type="number" id="prop-pos-z" step="0.1" class="prop-input">
+                </div>
+            </div>
+            <div class="prop-group">
+                <label class="prop-label">Rotation (deg)</label>
+                <div class="num-row">
+                    <input type="number" id="prop-rot-x" class="prop-input">
+                    <input type="number" id="prop-rot-y" class="prop-input">
+                    <input type="number" id="prop-rot-z" class="prop-input">
+                </div>
+            </div>
+            <div class="prop-group">
+                <label class="prop-label">Scale</label>
+                <div class="num-row">
+                    <input type="number" id="prop-scale-x" step="0.1" class="prop-input" value="1">
+                    <input type="number" id="prop-scale-y" step="0.1" class="prop-input" value="1">
+                    <input type="number" id="prop-scale-z" step="0.1" class="prop-input" value="1">
+                </div>
+            </div>
+            <div class="prop-group" style="display: flex; align-items: center; justify-content: space-between;">
+                <label class="prop-label" style="margin-bottom: 0;">Anchored</label>
+                <input type="checkbox" id="prop-anchored" checked>
+            </div>
+            
+            <div class="prop-group" style="display: flex; align-items: center; justify-content: space-between;">
+                <label class="prop-label" style="margin-bottom: 0;">Can Collide</label>
+                <input type="checkbox" id="prop-collide" checked>
+            </div>
+            <div class="prop-group">
+                <label class="prop-label">Opacity</label>
+                <input type="range" id="prop-opacity" min="0" max="1" step="0.1" value="1" class="prop-input">
+            </div>
+
+            <button id="prop-delete" style="background: #ff4444; color: white; border: none; padding: 8px; border-radius: 4px; cursor: pointer; font-weight: bold; margin-top: 5px;">Delete</button>
+        </div>
+        <div id="no-selection-text" style="color: #666; font-size: 12px; text-align: center; margin-top: 20px;">Select an object</div>
+    </div>
+</div>
+
+<div id="explorer-menu">
+    <div class="menu-item" id="menu-add-part">Part</div>
+    <div class="menu-item" id="menu-add-folder">Folder</div>
+    <div class="menu-item" id="menu-add-model">Model</div>
+</div>
+
+<div id="ui-info">Right-Click to Fly | WASD to move | Scroll to Zoom/First Person</div>
+
+<script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+            "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
+        }
+    }
+</script>
+
+<script type="module" src="./main.js" defer></script>
+
+</body>
+</html>
