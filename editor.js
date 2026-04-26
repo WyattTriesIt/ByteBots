@@ -68,6 +68,7 @@ const scaleInputs = { x: document.getElementById('prop-scale-x'), y: document.ge
 const anchoredInput = document.getElementById('prop-anchored');
 const collideInput = document.getElementById('prop-collide');
 const opacityInput = document.getElementById('prop-opacity');
+const roughnessInput = document.getElementById('prop-roughness');
 const explorerMenu = document.getElementById('explorer-menu');
 
 document.getElementById('right-sidebar').addEventListener('mousedown', (e) => e.stopPropagation());
@@ -247,16 +248,15 @@ function renderExplorerItem(item, depth = 0) {
         explorerMenu.style.left = left + 'px';
         explorerMenu.style.top = top + 'px';
         
-        // Adjust if off screen
-        setTimeout(() => {
-            const rect = explorerMenu.getBoundingClientRect();
-            if (rect.right > window.innerWidth) {
-                explorerMenu.style.left = (window.innerWidth - rect.width - 10) + 'px';
-            }
-            if (rect.bottom > window.innerHeight) {
-                explorerMenu.style.top = (window.innerHeight - rect.height - 10) + 'px';
-            }
-        }, 0);
+        // Adjust if off screen (forced reflow for accurate measurements)
+        explorerMenu.offsetHeight; // Force reflow
+        const rect = explorerMenu.getBoundingClientRect();
+        if (rect.right > window.innerWidth) {
+            explorerMenu.style.left = (window.innerWidth - rect.width - 10) + 'px';
+        }
+        if (rect.bottom > window.innerHeight) {
+            explorerMenu.style.top = (window.innerHeight - rect.height - 10) + 'px';
+        }
     };
     itemEl.appendChild(plus);
     
@@ -367,10 +367,19 @@ function findParentItem(itemId) {
     return search(explorerHierarchy.items);
 }
 
+// Memoized cache for object->id mapping to avoid recursive searches
+const objectIdCache = new Map();
+
 export function findItemIdForObject(obj) {
+    if (!obj) return null;
+    if (objectIdCache.has(obj)) return objectIdCache.get(obj);
+    
     const search = (items) => {
         for (let item of items) {
-            if (item.objectRef === obj) return item.id;
+            if (item.objectRef === obj) {
+                objectIdCache.set(obj, item.id);
+                return item.id;
+            }
             if (item.children) {
                 const found = search(item.children);
                 if (found) return found;
@@ -388,6 +397,39 @@ export function updateExplorer() {
     });
 }
 
+/**
+ * Updates the UV coordinates of a BoxGeometry to prevent texture stretching.
+ * Tiles the texture based on the physical world scale of the object.
+ */
+export function updateObjectUVs(obj) {
+    if (!obj || !obj.geometry || obj.geometry.type !== 'BoxGeometry') return;
+    
+    const geometry = obj.geometry;
+    const uvAttr = geometry.attributes.uv;
+    const tx = obj.userData.tileScaleX || 1;
+    const ty = obj.userData.tileScaleY || 1;
+    
+    const worldScale = new THREE.Vector3();
+    obj.getWorldScale(worldScale);
+
+    // BoxGeometry face order: +X, -X, +Y, -Y, +Z, -Z
+    const faceScales = [
+        [worldScale.z, worldScale.y], [worldScale.z, worldScale.y], // Sides (X)
+        [worldScale.x, worldScale.z], [worldScale.x, worldScale.z], // Top/Bottom (Y)
+        [worldScale.x, worldScale.y], [worldScale.x, worldScale.y]  // Front/Back (Z)
+    ];
+
+    for (let i = 0; i < 6; i++) {
+        const [w, h] = faceScales[i];
+        const off = i * 4;
+        uvAttr.setXY(off + 0, 0, h * ty);
+        uvAttr.setXY(off + 1, w * tx, h * ty);
+        uvAttr.setXY(off + 2, 0, 0);
+        uvAttr.setXY(off + 3, w * tx, 0);
+    }
+    uvAttr.needsUpdate = true;
+}
+
 export function updatePropertyValues() {
     if (state.selectedObjects.length === 0) return;
     
@@ -403,10 +445,13 @@ export function updatePropertyValues() {
         obj.getWorldScale(worldScale);
         anchoredInput.checked = obj.userData.anchored !== false;
         collideInput.checked = obj.userData.canCollide !== false;
+        roughnessInput.value = (obj.material && obj.material.roughness !== undefined) ? obj.material.roughness.toFixed(2) : 0.8;
         opacityInput.value = obj.userData.opacity !== undefined ? obj.userData.opacity : 1;
         if (obj.material && obj.material.transparent) {
             obj.material.opacity = opacityInput.value;
         }
+        tileScaleXInput.value = obj.userData.tileScaleX || 1;
+        tileScaleYInput.value = obj.userData.tileScaleY || 1;
     } else {
         // For multi-select, read the center of the selection group
         worldPos.copy(selectionGroup.position);
@@ -429,6 +474,9 @@ export function updatePropertyValues() {
     scaleInputs.x.value = worldScale.x.toFixed(2); 
     scaleInputs.y.value = worldScale.y.toFixed(2); 
     scaleInputs.z.value = worldScale.z.toFixed(2);
+
+    // Recalculate UVs whenever properties (like scale) change
+    state.selectedObjects.forEach(obj => updateObjectUVs(obj));
 }
 
 nameInput.oninput = () => { if (state.selectedObjects.length === 1) { state.selectedObjects[0].name = nameInput.value; updateExplorer(); } };
@@ -467,18 +515,161 @@ opacityInput.oninput = () => {
     });
 };
 
+roughnessInput.oninput = () => {
+    const roughnessValue = parseFloat(roughnessInput.value);
+    state.selectedObjects.forEach(obj => {
+        if (obj.material) {
+            obj.material.roughness = roughnessValue;
+        }
+    });
+};
+
+// --- MATERIAL SYSTEM ---
+const materialSelect = document.getElementById('prop-material');
+const tileScaleXInput = document.getElementById('prop-tile-scale-x');
+const tileScaleYInput = document.getElementById('prop-tile-scale-y');
+
+export const materials = {
+    list: ['Grass', 'Sand', 'Concrete', 'Bricks', 'Wood', 'WoodPlanks'],
+    cache: {},
+    textureLoader: new THREE.TextureLoader(),
+    
+    async loadMaterial(name) {
+        if (this.cache[name]) return this.cache[name];
+        
+        try {
+            const basePath = `./Materials/${name}/`;
+            const [colorTex, roughnessTex, normalTex] = await Promise.all([
+                new Promise((res, rej) => this.textureLoader.load(`${basePath}${name}.png`, res, undefined, rej)),
+                new Promise((res, rej) => this.textureLoader.load(`${basePath}${name}Roughness.png`, res, undefined, rej)),
+                new Promise((res, rej) => this.textureLoader.load(`${basePath}${name}Normal.png`, res, undefined, rej))
+            ]);
+
+            // Configure textures for best quality
+            [colorTex, roughnessTex, normalTex].forEach(tex => {
+                tex.magFilter = THREE.LinearFilter;
+                tex.minFilter = THREE.LinearMipmapLinearFilter;
+                tex.colorSpace = tex === normalTex ? THREE.NoColorSpace : THREE.SRGBColorSpace;
+            });
+
+            this.cache[name] = { colorTex, roughnessTex, normalTex };
+            return this.cache[name];
+        } catch (err) {
+            console.warn(`Failed to load material ${name}:`, err);
+            return null;
+        }
+    },
+    
+    applyToObject(obj, materialName, tileScaleX = 1, tileScaleY = 1) {
+        const loadedMat = this.cache[materialName];
+        if (!loadedMat) return false;
+        
+        // Clone textures so each object has independent tiling
+        const colorTex = loadedMat.colorTex.clone();
+        const roughnessTex = loadedMat.roughnessTex.clone();
+        const normalTex = loadedMat.normalTex.clone();
+        
+        // Set repeating and offset for tiling
+        const setTiling = (tex) => {
+            tex.repeat.set(1, 1); // We now handle tiling via UVs
+            tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        };
+        setTiling(colorTex);
+        setTiling(roughnessTex);
+        setTiling(normalTex);
+        
+        obj.material.map = colorTex;
+        obj.material.roughnessMap = roughnessTex;
+        obj.material.roughness = 0.8; // Base roughness value
+        obj.material.normalMap = normalTex;
+        obj.material.normalScale.set(0.5, 0.5); // Adjust normal strength
+        obj.material.needsUpdate = true;
+        
+        obj.userData.material = materialName;
+        obj.userData.tileScaleX = tileScaleX;
+        obj.userData.tileScaleY = tileScaleY;
+        
+        updateObjectUVs(obj);
+        return true;
+    }
+};
+
+// Initialize material dropdown
+async function initMaterialDropdown() {
+    materialSelect.innerHTML = '<option value="">None</option>';
+    
+    // Pre-load all materials
+    for (const matName of materials.list) {
+        await materials.loadMaterial(matName);
+        const option = document.createElement('option');
+        option.value = matName;
+        option.textContent = matName;
+        materialSelect.appendChild(option);
+    }
+}
+
+materialSelect.onchange = () => {
+    if (state.selectedObjects.length === 0) return;
+    
+    const materialName = materialSelect.value;
+    const tx = parseFloat(tileScaleXInput.value) || 1;
+    const ty = parseFloat(tileScaleYInput.value) || 1;
+    
+    state.selectedObjects.forEach(obj => {
+        if (!obj.material) return;
+        
+        if (materialName === '') {
+            // Remove material, reset to white
+            obj.material.map = null;
+            obj.material.roughnessMap = null;
+            obj.material.normalMap = null;
+            obj.material.roughness = 0.8;
+            obj.userData.material = '';
+            obj.material.needsUpdate = true;
+        } else {
+            materials.applyToObject(obj, materialName, tx, ty);
+        }
+    });
+};
+
+const handleTileUpdate = () => {
+    if (state.selectedObjects.length === 0 || !materialSelect.value) return;
+    const tx = parseFloat(tileScaleXInput.value) || 1;
+    const ty = parseFloat(tileScaleYInput.value) || 1;
+    state.selectedObjects.forEach(obj => {
+        obj.userData.tileScaleX = tx;
+        obj.userData.tileScaleY = ty;
+        updateObjectUVs(obj);
+    });
+};
+tileScaleXInput.oninput = handleTileUpdate;
+tileScaleYInput.oninput = handleTileUpdate;
+
+// Initialize on load
+initMaterialDropdown();
+
 export function showInspector() {
     if (state.selectedObjects.length > 0) {
         propertyControls.style.display = 'flex'; noSelectionText.style.display = 'none';
         if (state.selectedObjects.length > 1) {
             nameInput.value = "Multiple Objects"; nameInput.disabled = true;
             colorPicker.parentElement.style.opacity = "0.5"; deleteBtn.style.visibility = 'visible';
+            materialSelect.value = '';
+            roughnessInput.value = 0.8;
+            tileScaleXInput.value = 1;
+            tileScaleYInput.value = 1;
         } else {
             const target = state.selectedObjects[0];
             nameInput.value = target.name; nameInput.disabled = false;
             colorPicker.value = '#' + target.material.color.getHexString();
             colorPicker.parentElement.style.opacity = "1";
             deleteBtn.style.visibility = (target === baseplate) ? 'hidden' : 'visible';
+            
+            // Update material and tile scale
+            materialSelect.value = target.userData.material || '';
+            roughnessInput.value = target.material.roughness !== undefined ? target.material.roughness : 0.8;
+            tileScaleXInput.value = target.userData.tileScaleX || 1;
+            tileScaleYInput.value = target.userData.tileScaleY || 1;
         }
         // Moved this outside the if/else so it updates fields for BOTH single and multi-select
         updatePropertyValues();
@@ -663,16 +854,15 @@ export function showRightClickMenu(x, y, contextId = null) {
     rightClickMenu.style.top = y + 'px';
     rightClickMenu.style.display = 'block';
     
-    // Keep menu on screen
-    setTimeout(() => {
-        const rect = rightClickMenu.getBoundingClientRect();
-        if (rect.right > window.innerWidth) {
-            rightClickMenu.style.left = (window.innerWidth - rect.width - 10) + 'px';
-        }
-        if (rect.bottom > window.innerHeight) {
-            rightClickMenu.style.top = (window.innerHeight - rect.height - 10) + 'px';
-        }
-    }, 0);
+    // Keep menu on screen (forced reflow for accurate measurements)
+    rightClickMenu.offsetHeight; // Force reflow
+    const rect = rightClickMenu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) {
+        rightClickMenu.style.left = (window.innerWidth - rect.width - 10) + 'px';
+    }
+    if (rect.bottom > window.innerHeight) {
+        rightClickMenu.style.top = (window.innerHeight - rect.height - 10) + 'px';
+    }
 }
 
 function getActiveParent() {
@@ -749,31 +939,35 @@ window.deleteSelected = () => {
     
     // 1. Determine what to delete
     if (contextItem && (contextItem.type === 'folder' || contextItem.type === 'model')) {
-        // Targeted a folder/model specifically in explorer
         idsToDelete.add(currentContextId);
     } else if (state.selectedObjects.length > 0) {
-        // Delete the active 3D selection
         state.selectedObjects.forEach(obj => {
+            if (!obj) return; // Defensive check
             const id = findItemIdForObject(obj);
             if (id) idsToDelete.add(id);
         });
     } else if (currentContextId) {
-        // Fallback: delete the single item right-clicked
         idsToDelete.add(currentContextId);
     }
 
     if (idsToDelete.size === 0) return;
 
-    // 2. IMPORTANT: Clear selection state BEFORE removing from scene
-    // This detaches objects from the selectionGroup and TransformControls
+    // 2. Clear selection state BEFORE removing from scene
     clearSelection();
+    
+    // Clear the object id cache for deleted items
+    idsToDelete.forEach(id => {
+        const item = explorerHierarchy.findItemById(id);
+        if (item) {
+            explorerHierarchy.getAllObjectsInItem(id).forEach(obj => objectIdCache.delete(obj));
+        }
+    });
 
     // 3. Execute deletion
     idsToDelete.forEach(id => {
         const item = explorerHierarchy.findItemById(id);
         if (!item || item.isProtected) return;
 
-        // Recursive cleanup of all 3D objects inside folders/models
         const objects = explorerHierarchy.getAllObjectsInItem(id);
         objects.forEach(obj => {
             if (obj === baseplate) return;
@@ -815,6 +1009,7 @@ deleteBtn.onclick = () => {
 };
 
 export function attachTool(obj, isMulti = false) {
+    if (!obj) return; // Defensive null check
     const currentChildren = [...selectionGroup.children].filter(c => c !== selectionBox && c !== scaleHandles);
     currentChildren.forEach(child => scene.attach(child));
 
@@ -934,25 +1129,26 @@ export function copySelection() {
             geometry: obj.geometry.clone(),
             material: obj.material.clone(),
             name: obj.name,
+            position: obj.position.clone(),
             scale: obj.scale.clone(),
             rotation: obj.quaternion.clone(), // Use quaternion for accuracy
             userData: JSON.parse(JSON.stringify(obj.userData))
         };
     });
-    console.log("Copied", clipboard.length, "objects");
 }
 
-// editor.js
 export function pasteSelection() {
     if (clipboard.length === 0) return;
 
     const newClones = [];
     const worldFolder = explorerHierarchy.getOrCreateWorld();
+    const offsetAmount = 2; // Offset pasted objects slightly to avoid overlap
     
-    clipboard.forEach(data => {
-        const mesh = new THREE.Mesh(data.geometry, data.material.clone());
+    clipboard.forEach((data, index) => {
+        const mesh = new THREE.Mesh(data.geometry.clone(), data.material.clone());
         const newName = explorerHierarchy.getNextName('object') + ' (Copy)';
         mesh.name = newName;
+        mesh.position.copy(data.position).add(new THREE.Vector3(offsetAmount * (index + 1), 0, 0));
         mesh.quaternion.copy(data.rotation);
         mesh.scale.copy(data.scale);
         mesh.userData = JSON.parse(JSON.stringify(data.userData));
@@ -962,6 +1158,13 @@ export function pasteSelection() {
         state.selectableObjects.push(mesh);
         newClones.push(mesh);
         
+        // Reapply material if it exists
+        if (data.userData.material && materials.cache[data.userData.material]) {
+            const tx = data.userData.tileScaleX || 1;
+            const ty = data.userData.tileScaleY || 1;
+            materials.applyToObject(mesh, data.userData.material, tx, ty);
+        }
+        
         // Add to World folder in hierarchy
         const hierarchyItem = { id: `obj-${Date.now()}-${Math.floor(Math.random() * 1000)}`, type: 'object', name: mesh.name, objectRef: mesh };
         worldFolder.children.push(hierarchyItem);
@@ -970,18 +1173,9 @@ export function pasteSelection() {
     if (newClones.length > 0) {
         clearSelection();
         
-        // Use attachTool on all objects to build the group and calculate the new center
+        // Select all pasted objects
         newClones.forEach((obj, i) => attachTool(obj, i > 0));
-
-        // Now that the group is centered on the objects, place the group on the surface
-        placeOnTargetSurface(selectionGroup);
-
-        // Snap the result
-        selectionGroup.position.x = snapValue(selectionGroup.position.x);
-        selectionGroup.position.y = snapValue(selectionGroup.position.y);
-        selectionGroup.position.z = snapValue(selectionGroup.position.z);
         
-        selectionGroup.updateMatrixWorld(true);
         updateExplorer();
         updatePropertyValues();
     }
