@@ -5,7 +5,7 @@ import {
     selectionGroup, scaleHandles, transformControls, attachTool, clearSelection, showRightClickMenu,
     showInspector, updateScaleHandles, updatePropertyValues, getSurfacePosition, snapValue, 
     setMode, updateExplorer, updateToolUI, placeOnTargetSurface,
-    copySelection, pasteSelection, findItemIdForObject, explorerHierarchy
+    copySelection, pasteSelection, findItemIdForObject, explorerHierarchy, updateObjectUVs
 } from './editor.js';
 
 // --- MOUSE & SHORTCUTS ---
@@ -189,6 +189,7 @@ export function duplicateSelection() {
         original.getWorldScale(worldScale);
 
         const clonedMesh = original.clone();
+        clonedMesh.geometry = original.geometry.clone();
         clonedMesh.material = original.material.clone();
         clonedMesh.name = original.name + " (Duplicate)";
         
@@ -289,7 +290,6 @@ window.addEventListener('wheel', (e) => {
 }, { passive: true });
 
 // --- PLAYTESTING SETUP ---
-const gravity = -0.015;
 const jumpStrength = 0.3;
 const moveSpeed = 0.1;
 let physicsWorld;
@@ -374,8 +374,13 @@ let shape;
             
             shape = new CANNON.Trimesh(vertices, indices);
         } else {
-            // Absolute fallback just in case
-            shape = new CANNON.Box(new CANNON.Vec3(worldScale.x/2, worldScale.y/2, worldScale.z/2));
+            // Absolute fallback: create a box with minimum safe dimensions
+            const minSize = 0.1;
+            shape = new CANNON.Box(new CANNON.Vec3(
+                Math.max(minSize, worldScale.x/2),
+                Math.max(minSize, worldScale.y/2),
+                Math.max(minSize, worldScale.z/2)
+            ));
         }
 
         const body = new CANNON.Body({
@@ -442,7 +447,6 @@ function togglePlayTest() {
                 rotation: obj.rotation.clone(),
                 scale: obj.scale.clone()
             };
-            obj.userData.velocity = new THREE.Vector3(0, 0, 0);
         });
 
         clearSelection();
@@ -454,20 +458,29 @@ function togglePlayTest() {
         btn.innerText = "Play Test";
         btn.style.background = "#2d5a3f";
         
+        // CRITICAL FIX: Clear selection FIRST to detach objects from selectionGroup
+        clearSelection();
+        
+        // Reset all objects to their original positions
         state.selectableObjects.forEach(obj => {
-            if (obj.userData.originalTransform) {
+            if (obj && obj.userData.originalTransform) {
                 obj.position.copy(obj.userData.originalTransform.position);
                 obj.rotation.copy(obj.userData.originalTransform.rotation);
                 obj.scale.copy(obj.userData.originalTransform.scale);
-                obj.userData.velocity.set(0, 0, 0);
                 obj.updateMatrixWorld();
             }
         });
 
+        // Clean up physics properly
         physicsBodies.clear();
-        physicsWorld = null;
-        scene.remove(state.playerGroup);
+        if (physicsWorld) {
+            physicsWorld.bodies.forEach(body => physicsWorld.removeBody(body));
+            physicsWorld = null;
+        }
+        if (state.playerGroup && scene) scene.remove(state.playerGroup);
         state.playerGroup = null;
+        
+        // Restore editor camera
         camera.position.copy(state.editorCameraTransform.position);
         camera.rotation.set(state.editorCameraTransform.rotation.x, state.editorCameraTransform.rotation.y, state.editorCameraTransform.rotation.z);
     }
@@ -501,7 +514,7 @@ function animate() {
             if (keys['KeyA']) moveDir.x -= 1; if (keys['KeyD']) moveDir.x += 1;
         }
 
-        if (moveDir.length() > 0) {
+        if (moveDir.length() > 0 && state.playerPhysicsBody) {
             // Face the camera's yaw direction before moving
             moveDir.normalize().applyAxisAngle(new THREE.Vector3(0, 1, 0), state.yaw);
             state.playerPhysicsBody.velocity.x = moveDir.x * (moveSpeed * 65);
@@ -518,7 +531,7 @@ function animate() {
             
             state.playerGroup.rotation.y += angleDiff * 0.15;
             
-        } else {
+        } else if (state.playerPhysicsBody) {
             state.playerPhysicsBody.velocity.x = 0;
             state.playerPhysicsBody.velocity.z = 0;
         }
@@ -537,15 +550,17 @@ function animate() {
         }
 
         // --- 4. STEP & SYNC ---
-        physicsWorld.fixedStep(); 
-        state.playerGroup.position.copy(state.playerPhysicsBody.position);
+        if (physicsWorld && state.playerPhysicsBody) {
+            physicsWorld.fixedStep();
+            state.playerGroup.position.copy(state.playerPhysicsBody.position);
 
-        physicsBodies.forEach((body, mesh) => {
-            if (body.mass > 0) {
-                mesh.position.copy(body.position);
-                mesh.quaternion.copy(body.quaternion);
-            }
-        });
+            physicsBodies.forEach((body, mesh) => {
+                if (body.mass > 0 && mesh && body) {
+                    mesh.position.copy(body.position);
+                    mesh.quaternion.copy(body.quaternion);
+                }
+            });
+        }
 
         // --- 5. CAMERA (Look at the Head at Y = 1.2) ---
         const headPos = state.playerGroup.position.clone().add(new THREE.Vector3(0, 1.2, 0));
