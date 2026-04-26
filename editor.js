@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
-import { scene, camera, renderer, baseplate, state, raycaster } from './setup.js';
+import { scene, camera, renderer, baseplate, state, raycaster, composer, bloomPass, sun, gameUIContainer } from './setup.js';
 
 export const transformControls = new TransformControls(camera, renderer.domElement);
 scene.add(transformControls);
@@ -10,9 +10,10 @@ scene.add(selectionGroup);
 
 export const selectionBox = new THREE.LineSegments(
     new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), 
-    new THREE.LineBasicMaterial({ color: 0x00ff88, depthTest: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 })
+    new THREE.LineBasicMaterial({ color: 0x00ff88, depthTest: false, transparent: true, opacity: 0.8 })
 );
 selectionBox.visible = false;
+selectionBox.renderOrder = 1000;
 selectionGroup.add(selectionBox); 
 
 export const scaleHandles = new THREE.Group();
@@ -29,6 +30,7 @@ handleData.forEach(data => {
         new THREE.SphereGeometry(0.35, 16, 16),
         new THREE.MeshBasicMaterial({ color: data.color, depthTest: false, transparent: true, opacity: 0.8 })
     );
+    sphere.renderOrder = 1000;
     sphere.userData.direction = data.dir;
     scaleHandles.add(sphere);
 });
@@ -39,7 +41,14 @@ export function updateScaleHandles() {
         scaleHandles.visible = false; return;
     }
     scaleHandles.visible = true;
-    const invScale = new THREE.Vector3(1 / selectionGroup.scale.x, 1 / selectionGroup.scale.y, 1 / selectionGroup.scale.z);
+
+    // Maintain consistent screen size regardless of camera distance
+    const dist = camera.position.distanceTo(selectionGroup.position);
+    const sizeFactor = dist * 0.05; 
+
+    // Counter the selectionGroup's scale and apply distance factor
+    const invScale = new THREE.Vector3(1 / selectionGroup.scale.x, 1 / selectionGroup.scale.y, 1 / selectionGroup.scale.z)
+        .multiplyScalar(sizeFactor);
 
     scaleHandles.children.forEach(handle => {
         const dir = handle.userData.direction;
@@ -55,11 +64,112 @@ transformControls.addEventListener('change', () => {
     }
 });
 
+// --- SYSTEM REFRESH LOGIC ---
+/**
+ * Updates the entire scene based on where items are in the explorer.
+ */
+export function refreshSceneState() {
+    // 1. Reset Global Environment Effects
+    if (scene.fog) scene.fog = null;
+    if (bloomPass) bloomPass.strength = 0;
+    if (sun) sun.intensity = 1.2;
+    gameUIContainer.innerHTML = ''; 
+
+    const processItem = (item, inWorld = false, inLighting = false, inUI = false) => {
+        const isWorld = inWorld || item.id === 'world-folder';
+        const isLighting = inLighting || item.id === 'folder-lighting';
+        const isUI = inUI || item.id === 'folder-ui';
+
+        // Handle Physical Objects & Lights (Only functional in the World)
+        if (item.objectRef) {
+            const parentItem = findParentItem(item.id);
+            const parentObj = (parentItem && parentItem.objectRef) ? parentItem.objectRef : scene;
+            
+            if (isWorld) {
+                // Ensure the 3D object is in the scene and parented correctly
+                if (item.objectRef.parent !== parentObj && !state.selectedObjects.includes(item.objectRef)) {
+                    parentObj.add(item.objectRef);
+                }
+                
+                if (item.objectRef.isMesh) item.objectRef.visible = true;
+
+                // Special Light Logic
+                if (item.type === 'light') {
+                    const isInsidePart = parentItem && parentItem.type === 'object';
+                    
+                    // Toggle the "bulb" helper: Hide it if parented to a part
+                    const helper = item.objectRef.children.find(c => c.isMesh);
+                    if (helper) helper.visible = !isInsidePart;
+                    
+                    // If inside a part, center the light source within it
+                    if (isInsidePart) item.objectRef.position.set(0, 0, 0);
+                    
+                    const lp = item.properties || {};
+                    const light = item.objectRef.children.find(c => c.isLight);
+                    if (light) {
+                        light.intensity = lp.intensity ?? 1;
+                        light.distance = lp.range ?? 100;
+                        light.color.set(lp.color || '#ffffff');
+                    }
+                }
+            } else {
+                // Remove from scene if moved out of World
+                if (item.objectRef.parent) item.objectRef.parent.remove(item.objectRef);
+                if (item.objectRef.isMesh) item.objectRef.visible = false;
+            }
+        }
+
+        // Handle UI Elements
+        if (isUI && (item.type === 'textlabel' || item.type === 'textbutton')) {
+            const p = item.properties || {};
+            const el = document.createElement(item.type === 'textbutton' ? 'button' : 'div');
+            el.innerText = p.text || 'UI Element';
+            el.style.cssText = `
+                position: absolute; pointer-events: auto; padding: 5px 10px;
+                background: ${p.color || '#444444'}; color: ${p.textColor || '#ffffff'};
+                font-size: ${p.fontSize || 14}px; border: none; border-radius: 4px;
+                display: ${p.visible === false ? 'none' : 'block'};
+            `;
+            // Dummy position for demo
+            el.style.top = '20px'; el.style.left = '20px';
+            gameUIContainer.appendChild(el);
+        }
+
+        // Handle Effects (Only in Lighting)
+        if (isLighting && item.type === 'effect') {
+            const p = item.properties || {};
+            if (item.subType === 'bloom') {
+                bloomPass.strength = p.strength || 0;
+                bloomPass.radius = p.radius || 0.4;
+            } else if (item.subType === 'fog') {
+                scene.fog = new THREE.FogExp2(p.color || 0x87CEEB, p.density || 0.01);
+            } else if (item.subType === 'sunrays') {
+                if (sun) sun.intensity = p.intensity || 2;
+            }
+        }
+
+        if (item.children) {
+            item.children.forEach(child => processItem(child, isWorld, isLighting, isUI));
+        }
+    };
+
+    explorerHierarchy.items.forEach(item => processItem(item));
+}
+
 // --- UI AND INSPECTOR ---
 const explorerList = document.getElementById('explorer-list');
 const propertyControls = document.getElementById('property-controls');
 const noSelectionText = document.getElementById('no-selection-text');
 const nameInput = document.getElementById('prop-name');
+
+// Create dynamic properties container if it doesn't exist
+let dynamicProps = document.getElementById('dynamic-properties');
+if (!dynamicProps) {
+    dynamicProps = document.createElement('div');
+    dynamicProps.id = 'dynamic-properties';
+    propertyControls.appendChild(dynamicProps);
+}
+
 const colorPicker = document.getElementById('prop-color');
 const deleteBtn = document.getElementById('prop-delete');
 const posInputs = { x: document.getElementById('prop-pos-x'), y: document.getElementById('prop-pos-y'), z: document.getElementById('prop-pos-z') };
@@ -77,25 +187,68 @@ document.getElementById('right-sidebar').addEventListener('mousedown', (e) => e.
 export const explorerHierarchy = {
     items: [],
     expanded: {},
-    objectCounter: { 'object': 1, 'folder': 1, 'model': 1 },
+    objectCounter: { 'object': 1, 'folder': 1, 'model': 1, 'light': 1, 'effect': 1, 'sound': 1 },
     
     getOrCreateWorld() {
         let world = this.items.find(item => item.type === 'folder' && item.name === 'World');
         if (!world) {
             world = { id: 'world-folder', type: 'folder', name: 'World', children: [], isProtected: true };
             this.items.push(world);
+            // Add Baseplate to explorer
+            const bpItem = { id: 'obj-baseplate', type: 'object', name: 'Baseplate', objectRef: baseplate, isProtected: false };
+            world.children.push(bpItem);
             this.expanded['world-folder'] = true;
         }
         return world;
+    },
+
+    initializeDefaultFolders() {
+        const defaultFolders = [
+            { name: 'Lighting', icon: '💡', properties: { brightness: 1, ambient: 0.4, sunDirection: { x: 50, y: 100, z: 50 } } },
+            { name: 'Camera', icon: '📷', properties: { viewDistance: 500, fov: 75 } },
+            { name: 'UI', icon: '🎨', properties: { scaleMode: 'scale', enabled: true } },
+            { name: 'Terrain', icon: '🏔️', properties: { material: 'Grass' } },
+            { name: 'Audio', icon: '🔊', properties: {} },
+            { name: 'Effects', icon: '✨', properties: {} },
+            { name: 'Scripting', icon: '📝', properties: {} }
+        ];
+
+        defaultFolders.forEach(folderData => {
+            if (!this.items.find(item => item.type === 'folder' && item.name === folderData.name)) {
+                const folder = {
+                    id: `folder-${folderData.name.toLowerCase()}`,
+                    type: 'folder',
+                    name: folderData.name,
+                    children: [],
+                    isProtected: true,
+                    folderIcon: folderData.icon,
+                    properties: { ...folderData.properties }
+                };
+                this.items.push(folder);
+                this.expanded[folder.id] = true;
+            }
+        });
     },
     
     getNextName(type) {
         const names = {
             'object': 'Part',
             'folder': 'Folder',
-            'model': 'Model'
+            'model': 'Model',
+            'light': 'Light',
+            'effect': 'Effect',
+            'sound': 'Sound',
+            'bloom': 'Bloom',
+            'sunrays': 'SunRays',
+            'fog': 'Fog',
+            'particle': 'Particle',
+            'decal': 'Decal',
+            'textlabel': 'TextLabel',
+            'imagebutton': 'ImageButton',
+            'textbutton': 'TextButton'
         };
-        return `${names[type]} ${this.objectCounter[type]++}`;
+        const key = type.toLowerCase();
+        return `${names[key] || type} ${this.objectCounter[key] || this.objectCounter['object']++}`;
     },
     
     findItemById(id) {
@@ -159,6 +312,7 @@ export const explorerHierarchy = {
         const newParent = this.findItemById(newParentId);
         if (newParent && newParent.children) {
             newParent.children.push(item);
+            refreshSceneState();
             return true;
         }
         return false;
@@ -181,8 +335,9 @@ export const explorerHierarchy = {
     }
 };
 
-// Initialize World folder on startup
+// Initialize World folder on startup and add default folders
 explorerHierarchy.getOrCreateWorld();
+explorerHierarchy.initializeDefaultFolders();
 
 // Current context (for the menu)
 export let currentContextId = null;
@@ -211,11 +366,12 @@ function renderExplorerItem(item, depth = 0) {
     itemEl.draggable = true; // All items (Objects, Folders, Models) can now be dragged
     itemEl.dataset.itemId = item.id;
     
-    const isSelected = item.objectRef && state.selectedObjects.includes(item.objectRef);
-    if (isSelected) itemEl.classList.add('selected');
+    const isObjectSelected = item.objectRef && state.selectedObjects.includes(item.objectRef);
+    const isItemSelected = state.currentSelectedItem === item;
+    if (isObjectSelected || isItemSelected) itemEl.classList.add('selected');
     
     // Arrow for folders/models
-    if (item.children) {
+    if (item.children && item.children.length > 0) {
         const arrow = document.createElement('div');
         arrow.className = 'exp-arrow' + (explorerHierarchy.expanded[item.id] ? ' open' : '');
         arrow.innerText = '▶';
@@ -225,7 +381,27 @@ function renderExplorerItem(item, depth = 0) {
             updateExplorer(); 
         };
         itemEl.appendChild(arrow);
+    } else {
+        // Add empty space for items without arrow
+        const emptySpace = document.createElement('div');
+        emptySpace.style.width = '12px';
+        emptySpace.style.display = 'inline-block';
+        itemEl.appendChild(emptySpace);
     }
+    
+    // Icon for the item
+    const iconSpan = document.createElement('span');
+    iconSpan.style.marginRight = '5px';
+    const icons = {
+        'folder': '📁',
+        'model': '🎁',
+        'object': '🟦',
+        'light': '💡',
+        'effect': '✨',
+        'sound': '🔊'
+    };
+    iconSpan.innerText = icons[item.type] || icons['object'];
+    itemEl.appendChild(iconSpan);
     
     // Item name
     const nameSpan = document.createElement('span');
@@ -240,6 +416,51 @@ function renderExplorerItem(item, depth = 0) {
     plus.onclick = (e) => {
         e.stopPropagation();
         currentContextId = item.id;
+        
+        // Show all possible items regardless of context
+        const menuItems = [
+            { type: 'create', label: 'Part', objectType: 'Object' },
+            { type: 'create', label: 'Folder', objectType: 'Folder' },
+            { type: 'create', label: 'Model', objectType: 'Model' },
+            { type: 'divider' },
+            { type: 'create', label: '💡 Light', objectType: 'Light' },
+            { type: 'create', label: '🔊 Sound', objectType: 'Sound' },
+            { type: 'divider' },
+            { type: 'create', label: '✨ Bloom', objectType: 'Bloom' },
+            { type: 'create', label: '🌫️ Fog', objectType: 'Fog' },
+            { type: 'create', label: '☀️ Sun Rays', objectType: 'SunRays' },
+            { type: 'create', label: '💫 Particles', objectType: 'ParticleEmitter' },
+            { type: 'divider' },
+            { type: 'create', label: 'Text Label', objectType: 'TextLabel' },
+            { type: 'create', label: 'Image Button', objectType: 'ImageButton' },
+            { type: 'create', label: 'Text Button', objectType: 'TextButton' }
+        ];
+        
+        // Build HTML
+        let menuHtml = '';
+        menuItems.forEach((menuItem, index) => {
+            if (menuItem.type === 'divider') {
+                menuHtml += `<div style="border-top: 1px solid #444; margin: 5px 0;"></div>`;
+                return;
+            }
+            menuHtml += `<div class="menu-item" data-explorer-index="${index}">${menuItem.label}</div>`;
+        });
+        
+        explorerMenu.innerHTML = menuHtml;
+        
+        // Attach event listeners
+        menuItems.forEach((menuItem, index) => {
+            if (menuItem.type === 'divider') return;
+            const element = explorerMenu.querySelector(`[data-explorer-index="${index}"]`);
+            if (element) {
+                element.onclick = (e) => {
+                    e.stopPropagation();
+                    createObjectInFolder(currentContextId, menuItem.objectType);
+                    explorerMenu.style.display = 'none';
+                };
+            }
+        });
+        
         explorerMenu.style.display = 'block';
         
         // Position menu and keep it on screen
@@ -272,16 +493,22 @@ function renderExplorerItem(item, depth = 0) {
     itemEl.onclick = (e) => {
         e.stopPropagation();
         
-        if (item.type === 'folder' || item.type === 'model') {
-            // Select all objects inside this folder/model
-            const allObjects = explorerHierarchy.getAllObjectsInItem(item.id);
-            if (allObjects.length > 0) {
-                clearSelection();
-                allObjects.forEach((obj, i) => attachTool(obj, i > 0));
-                showInspector();
+        if (item.type === 'folder' || item.type === 'model' || item.type === 'light' || item.type === 'effect' || item.type === 'sound') {
+            // Select the folder/model itself for property editing
+            state.currentSelectedItem = item;
+            
+            // Also select all objects inside this folder/model if it's a container
+            if (item.children) {
+                const allObjects = explorerHierarchy.getAllObjectsInItem(item.id);
+                if (allObjects.length > 0) {
+                    clearSelection();
+                    allObjects.forEach((obj, i) => attachTool(obj, i > 0));
+                }
             }
+            showInspector();
         } else if (item.objectRef) {
             // For objects, check if they're inside a model - if so, select all in that model
+            state.currentSelectedItem = null;
             const modelParent = findModelParent(item.id);
             if (modelParent) {
                 const allInModel = explorerHierarchy.getAllObjectsInItem(modelParent.id);
@@ -319,6 +546,7 @@ function renderExplorerItem(item, depth = 0) {
         
         if (draggedItemId && draggedItemId !== item.id && item.children) {
             explorerHierarchy.moveItem(draggedItemId, item.id);
+            refreshSceneState();
             updateExplorer();
         }
         draggedItemId = null;
@@ -479,7 +707,15 @@ export function updatePropertyValues() {
     state.selectedObjects.forEach(obj => updateObjectUVs(obj));
 }
 
-nameInput.oninput = () => { if (state.selectedObjects.length === 1) { state.selectedObjects[0].name = nameInput.value; updateExplorer(); } };
+nameInput.oninput = () => {
+    if (state.currentSelectedItem) {
+        state.currentSelectedItem.name = nameInput.value;
+        updateExplorer();
+    } else if (state.selectedObjects.length === 1) {
+        state.selectedObjects[0].name = nameInput.value;
+        updateExplorer();
+    }
+};
 
 const handleManualInput = () => {
     if (state.selectedObjects.length === 0) return;
@@ -649,21 +885,81 @@ tileScaleYInput.oninput = handleTileUpdate;
 initMaterialDropdown();
 
 export function showInspector() {
+    const currentItem = state.currentSelectedItem;
+    
+    // If a folder/model is selected, show its properties
+    if (currentItem && (currentItem.type === 'folder' || currentItem.type === 'model' || currentItem.type === 'effect' || currentItem.type === 'sound')) {
+        propertyControls.style.display = 'flex';
+        noSelectionText.style.display = 'none';
+        
+        nameInput.value = currentItem.name;
+        nameInput.disabled = currentItem.isProtected;
+        colorPicker.parentElement.style.opacity = "0.5";
+        deleteBtn.style.visibility = (currentItem.isProtected) ? 'hidden' : 'visible';
+        
+        // Hide object-specific properties
+        colorPicker.parentElement.parentElement.style.display = 'none'; // Color
+        document.getElementById('prop-material').parentElement.style.display = 'none'; // Material
+        document.getElementById('prop-roughness').parentElement.style.display = 'none'; // Roughness
+        document.getElementById('prop-tile-scale-x').parentElement.style.display = 'none'; // Tile scales
+        document.getElementById('prop-anchored').parentElement.style.display = 'none'; // Anchored
+        document.getElementById('prop-collide').parentElement.style.display = 'none'; // Can Collide
+        document.getElementById('prop-opacity').parentElement.style.display = 'none'; // Opacity
+        
+        // Clear position/rotation/scale inputs
+        posInputs.x.value = posInputs.y.value = posInputs.z.value = 0;
+        rotInputs.x.value = rotInputs.y.value = rotInputs.z.value = 0;
+        scaleInputs.x.value = scaleInputs.y.value = scaleInputs.z.value = 1;
+        
+        // Show folder-specific properties if they exist
+        if (currentItem.properties) {
+            Object.keys(currentItem.properties).forEach(key => {
+                const val = currentItem.properties[key];
+                let type = typeof val === 'number' ? 'number' : (typeof val === 'boolean' ? 'boolean' : 'color');
+                if (key.toLowerCase().includes('color')) type = 'color';
+
+                const control = createPropertyControl(key, val, type, (newVal) => {
+                    currentItem.properties[key] = type === 'number' ? parseFloat(newVal) : newVal;
+                    refreshSceneState();
+                });
+                dynamicProps.appendChild(control);
+            });
+        }
+        
+        updateExplorer();
+        return;
+    }
+    
+    // Regular object selection
     if (state.selectedObjects.length > 0) {
-        propertyControls.style.display = 'flex'; noSelectionText.style.display = 'none';
+        propertyControls.style.display = 'flex'; 
+        noSelectionText.style.display = 'none';
+        
+        // Show object-specific properties again
+        colorPicker.parentElement.parentElement.style.display = 'block';
+        document.getElementById('prop-material').parentElement.style.display = 'block';
+        document.getElementById('prop-roughness').parentElement.style.display = 'block';
+        document.getElementById('prop-tile-scale-x').parentElement.style.display = 'block';
+        document.getElementById('prop-anchored').parentElement.style.display = 'block';
+        document.getElementById('prop-collide').parentElement.style.display = 'block';
+        document.getElementById('prop-opacity').parentElement.style.display = 'block';
+        
         if (state.selectedObjects.length > 1) {
-            nameInput.value = "Multiple Objects"; nameInput.disabled = true;
-            colorPicker.parentElement.style.opacity = "0.5"; deleteBtn.style.visibility = 'visible';
+            nameInput.value = "Multiple Objects";
+            nameInput.disabled = true;
+            colorPicker.parentElement.style.opacity = "0.5";
+            deleteBtn.style.visibility = 'visible';
             materialSelect.value = '';
             roughnessInput.value = 0.8;
             tileScaleXInput.value = 1;
             tileScaleYInput.value = 1;
         } else {
             const target = state.selectedObjects[0];
-            nameInput.value = target.name; nameInput.disabled = false;
+            nameInput.value = target.name;
+            nameInput.disabled = false;
             colorPicker.value = '#' + target.material.color.getHexString();
             colorPicker.parentElement.style.opacity = "1";
-            deleteBtn.style.visibility = (target === baseplate) ? 'hidden' : 'visible';
+            deleteBtn.style.visibility = 'visible';
             
             // Update material and tile scale
             materialSelect.value = target.userData.material || '';
@@ -674,7 +970,8 @@ export function showInspector() {
         // Moved this outside the if/else so it updates fields for BOTH single and multi-select
         updatePropertyValues();
     } else {
-        propertyControls.style.display = 'none'; noSelectionText.style.display = 'block';
+        propertyControls.style.display = 'none';
+        noSelectionText.style.display = 'block';
     }
     updateExplorer();
 }
@@ -720,19 +1017,79 @@ function createObjectInFolder(parentId, type) {
         explorerHierarchy.expanded[parentId] = true;
         attachTool(mesh, false);
         
-    } else if (type === 'Folder') {
-        const folderName = explorerHierarchy.getNextName('folder');
-        const item = { id: `folder-${Date.now()}-${Math.floor(Math.random() * 1000)}`, type: 'folder', name: folderName, children: [] };
-        parent.children.push(item);
-        explorerHierarchy.expanded[parentId] = true;
+    } else if (type === 'Light') {
+        const lightName = explorerHierarchy.getNextName('light');
+        const lightGroup = new THREE.Group();
+        const light = new THREE.PointLight(0xffffff, 1, 100);
+        light.castShadow = true;
+        const visual = new THREE.Mesh(
+            new THREE.SphereGeometry(0.5, 8, 8),
+            new THREE.MeshBasicMaterial({ color: 0xffff00, wireframe: true })
+        );
+        lightGroup.add(light);
+        lightGroup.add(visual);
+        lightGroup.name = lightName;
         
-    } else if (type === 'Model') {
-        const modelName = explorerHierarchy.getNextName('model');
-        const item = { id: `model-${Date.now()}-${Math.floor(Math.random() * 1000)}`, type: 'model', name: modelName, children: [] };
+        state.selectableObjects.push(lightGroup);
+        placeOnTargetSurface(lightGroup);
+        
+        const item = { 
+            id: `light-${Date.now()}`, type: 'light', name: lightName, objectRef: lightGroup,
+            properties: { intensity: 1, range: 100, color: '#ffffff' }
+        };
         parent.children.push(item);
-        explorerHierarchy.expanded[parentId] = true;
+        refreshSceneState();
+        attachTool(lightGroup, false);
+        
+    } else if (type === 'Bloom') {
+        const bloomName = explorerHierarchy.getNextName('bloom');
+        const item = { id: `bloom-${Date.now()}`, type: 'effect', subType: 'bloom', name: bloomName, properties: { strength: 1.5, radius: 0.4, threshold: 0.85 } };
+        parent.children.push(item);
+        refreshSceneState();
+        
+    } else if (type === 'SunRays') {
+        const sunraysName = explorerHierarchy.getNextName('sunrays');
+        const item = { id: `sunrays-${Date.now()}`, type: 'effect', subType: 'sunrays', name: sunraysName, properties: { intensity: 2 } };
+        parent.children.push(item);
+        refreshSceneState();
+        
+    } else if (type === 'Fog') {
+        const fogName = explorerHierarchy.getNextName('fog');
+        const item = { id: `fog-${Date.now()}`, type: 'effect', subType: 'fog', name: fogName, properties: { color: '#87CEEB', density: 0.01 } };
+        parent.children.push(item);
+        refreshSceneState();
+    } else if (type === 'ParticleEmitter') {
+        const name = explorerHierarchy.getNextName('particle');
+        const item = { id: `parti-${Date.now()}`, type: 'effect', subType: 'particle', name: name, properties: { rate: 100, lifetime: 3, speed: 5 } };
+        parent.children.push(item);
+        refreshSceneState();
+    } else if (type === 'Sound') {
+        const name = explorerHierarchy.getNextName('sound');
+        const item = { id: `snd-${Date.now()}`, type: 'sound', name: name, properties: { volume: 0.5, pitch: 1, looped: false } };
+        parent.children.push(item);
+    } else if (type === 'Folder') {
+        const name = explorerHierarchy.getNextName('folder');
+        const item = { id: `folder-${Date.now()}`, type: 'folder', name: name, children: [], properties: {} };
+        parent.children.push(item);
+    } else if (type === 'Model') {
+        const name = explorerHierarchy.getNextName('model');
+        const item = { id: `model-${Date.now()}`, type: 'model', name: name, children: [], properties: {} };
+        parent.children.push(item);
+    } else if (type === 'TextLabel') {
+        const name = explorerHierarchy.getNextName('textlabel');
+        const item = { id: `ui-${Date.now()}`, type: 'textlabel', name: name, properties: { text: 'Label', fontSize: 18, color: '#ffffff', visible: true } };
+        parent.children.push(item);
+    } else if (type === 'TextButton') {
+        const name = explorerHierarchy.getNextName('textbutton');
+        const item = { id: `ui-${Date.now()}`, type: 'textbutton', name: name, properties: { text: 'Button', color: '#444444', textColor: '#ffffff' } };
+        parent.children.push(item);
+    } else if (type === 'ImageButton') {
+        const name = explorerHierarchy.getNextName('imagebutton');
+        const item = { id: `ui-${Date.now()}`, type: 'imagebutton', name: name, properties: { imageAssetId: 0, transparency: 0 } };
+        parent.children.push(item);
     }
     
+    explorerHierarchy.expanded[parentId] = true;
     updateExplorer();
 }
 
@@ -783,11 +1140,43 @@ export function showRightClickMenu(x, y, contextId = null) {
     let menuHtml = '';
     const menuItems = [];
 
-    // Add options for folders/models or background (World)
+    // Add options based on context
     if (isContainer) {
+        const folderName = contextItem.name || '';
+        
+        // Always allow basic objects
         menuItems.push({ type: 'create', label: 'Add Part', objectType: 'Object' });
         menuItems.push({ type: 'create', label: 'Add Folder', objectType: 'Folder' });
         menuItems.push({ type: 'create', label: 'Add Model', objectType: 'Model' });
+        
+        // Context-specific items
+        if (folderName === 'Lighting') {
+            menuItems.push({ type: 'divider' });
+            menuItems.push({ type: 'create', label: '💡 Add Light', objectType: 'Light' });
+            menuItems.push({ type: 'create', label: '✨ Add Bloom', objectType: 'Bloom' });
+            menuItems.push({ type: 'create', label: '☀️ Add Sun Rays', objectType: 'SunRays' });
+            menuItems.push({ type: 'create', label: '🌫️ Add Fog', objectType: 'Fog' });
+        } else if (folderName === 'Effects') {
+            menuItems.push({ type: 'divider' });
+            menuItems.push({ type: 'create', label: '✨ Add Bloom', objectType: 'Bloom' });
+            menuItems.push({ type: 'create', label: '☀️ Add Sun Rays', objectType: 'SunRays' });
+            menuItems.push({ type: 'create', label: '🌫️ Add Fog', objectType: 'Fog' });
+            menuItems.push({ type: 'create', label: '💫 Add Particle Emitter', objectType: 'ParticleEmitter' });
+        } else if (folderName === 'Audio') {
+            menuItems.push({ type: 'divider' });
+            menuItems.push({ type: 'create', label: '🔊 Add Sound', objectType: 'Sound' });
+        } else if (folderName === 'UI') {
+            menuItems.push({ type: 'divider' });
+            menuItems.push({ type: 'create', label: 'Text Label', objectType: 'TextLabel' });
+            menuItems.push({ type: 'create', label: 'Image Button', objectType: 'ImageButton' });
+            menuItems.push({ type: 'create', label: 'Text Button', objectType: 'TextButton' });
+        } else {
+            // For other folders/models, show general options
+            menuItems.push({ type: 'divider' });
+            menuItems.push({ type: 'create', label: '💡 Light', objectType: 'Light' });
+            menuItems.push({ type: 'create', label: '🔊 Sound', objectType: 'Sound' });
+        }
+        
         if (hasSelection) menuHtml += `<div style="border-top: 1px solid #444; margin: 5px 0;"></div>`;
     }
 
@@ -819,6 +1208,10 @@ export function showRightClickMenu(x, y, contextId = null) {
     // Build HTML and attach event listeners
     menuHtml = '';
     menuItems.forEach((item, index) => {
+        if (item.type === 'divider') {
+            menuHtml += `<div style="border-top: 1px solid #444; margin: 5px 0;"></div>`;
+            return;
+        }
         if (item.label === undefined) return; // Skip dividers
         const deleteStyle = item.isDelete ? 'color: #ff6666;' : '';
         const borderStyle = item.isDelete ? 'border-top: 1px solid #444; margin-top: 5px;' : '';
@@ -829,7 +1222,7 @@ export function showRightClickMenu(x, y, contextId = null) {
 
     // Attach event listeners to menu items
     menuItems.forEach((item, index) => {
-        if (item.label === undefined) return; // Skip dividers
+        if (item.label === undefined || item.type === 'divider') return; // Skip dividers
         const element = rightClickMenu.querySelector(`[data-menu-index="${index}"]`);
         if (element) {
             element.onclick = (e) => {
@@ -970,12 +1363,12 @@ window.deleteSelected = () => {
 
         const objects = explorerHierarchy.getAllObjectsInItem(id);
         objects.forEach(obj => {
-            if (obj === baseplate) return;
             if (obj.parent) obj.parent.remove(obj);
             const idx = state.selectableObjects.indexOf(obj);
             if (idx > -1) state.selectableObjects.splice(idx, 1);
         });
         explorerHierarchy.removeItem(id);
+        refreshSceneState();
     });
 
     currentContextId = null;
@@ -1001,6 +1394,7 @@ export function clearSelection() {
     selectionGroup.position.set(0, 0, 0); selectionGroup.rotation.set(0, 0, 0); selectionGroup.scale.set(1, 1, 1);
     selectionGroup.updateMatrixWorld();
     state.selectedObjects = [];
+    state.currentSelectedItem = null;
     transformControls.detach(); scaleHandles.visible = false; selectionBox.visible = false;
 }
 
