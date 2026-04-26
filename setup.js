@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
 export const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87CEEB); 
@@ -11,6 +14,22 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.appendChild(renderer.domElement);
+
+// GUI Layer
+export const gameUIContainer = document.createElement('div');
+gameUIContainer.id = 'game-ui-container';
+gameUIContainer.style.cssText = 'position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; overflow: hidden;';
+document.body.appendChild(gameUIContainer);
+
+// Post-Processing Setup
+export const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+
+export const bloomPass = new UnrealBloomPass(
+    new THREE.Vector2(window.innerWidth, window.innerHeight),
+    0, 0, 0 // Start at 0 strength
+);
+composer.addPass(bloomPass);
 
 // Lighting
 scene.add(new THREE.AmbientLight(0xffffff, 0.4));
@@ -42,6 +61,7 @@ scene.add(baseplate);
 export const state = {
     selectableObjects: [baseplate],
     selectedObjects: [],
+    currentSelectedItem: null, // Can be a folder or model from the explorer hierarchy
     currentMode: 'select',
     isDraggingObject: false,
     snapAmount: 1,
