@@ -1,10 +1,10 @@
 import * as CANNON from 'cannon-es';
 import * as THREE from 'three';
-import { scene, camera, renderer, raycaster, mouse, keys, baseplate, state } from './setup.js';
+import { scene, camera, renderer, raycaster, mouse, keys, baseplate, state, composer } from './setup.js';
 import { 
     selectionGroup, scaleHandles, transformControls, attachTool, clearSelection, showRightClickMenu,
     showInspector, updateScaleHandles, updatePropertyValues, getSurfacePosition, snapValue, 
-    setMode, updateExplorer, updateToolUI, placeOnTargetSurface,
+    setMode, updateExplorer, updateToolUI, placeOnTargetSurface, refreshSceneState,
     copySelection, pasteSelection, findItemIdForObject, explorerHierarchy, updateObjectUVs
 } from './editor.js';
 
@@ -586,10 +586,16 @@ function animate() {
         camera.rotation.set(state.pitch, state.yaw, 0, 'YXZ');
     }
 
-    renderer.render(scene, camera);
+    // Constantly update scale gizmo to account for camera movement and zooming
+    if (state.currentMode === 'scale' && !state.isPlayTesting) {
+        updateScaleHandles();
+    }
+
+    composer.render();
 }
 
 window.addEventListener('contextmenu', e => e.preventDefault());
 updateExplorer();
+refreshSceneState();
 updateToolUI('mode-select');
 animate();
