@@ -21,8 +21,8 @@ sun.shadow.camera.left = -100;
 sun.shadow.camera.right = 100;
 sun.shadow.camera.top = 100;
 sun.shadow.camera.bottom = -100;
-sun.shadow.mapSize.width = 2048; // Optimized from 5000
-sun.shadow.mapSize.height = 2048;
+sun.shadow.mapSize.width = 5000; // Optimized from 5000
+sun.shadow.mapSize.height = 5000;
 scene.add(sun);
 
 export const raycaster = new THREE.Raycaster();
@@ -54,7 +54,6 @@ export const state = {
     pitch: 0,
     isPlayTesting: false,
     playerGroup: null,
-    playerVelocity: new THREE.Vector3(),
     isGrounded: false,
     cameraZoom: 10,
     isFirstPerson: false,
