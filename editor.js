@@ -84,42 +84,50 @@ export function refreshSceneState() {
         // Handle 3D Objects & Lights
         // Handle Physical Objects & Lights (Only functional in the World)
         if (item.objectRef) {
-            const parent = findParentItem(item.id);
             const parentItem = findParentItem(item.id);
             const parentObj = (parentItem && parentItem.objectRef) ? parentItem.objectRef : scene;
             
             if (isWorld) {
-                if (!scene.children.includes(item.objectRef)) scene.add(item.objectRef);
+                if (!scene.children.includes(item.objectRef) && !item.objectRef.parent) scene.add(item.objectRef);
                 // Ensure the 3D object is in the scene and parented correctly
                 if (item.objectRef.parent !== parentObj && !state.selectedObjects.includes(item.objectRef)) {
                     parentObj.add(item.objectRef);
                 }
                 
-                if (item.objectRef.isMesh) item.objectRef.visible = true;
+                if (item.objectRef.isMesh) {
+                    item.objectRef.visible = true;
+                    item.objectRef.castShadow = item.objectRef.userData.castShadow !== false;
+                }
 
-                // Special Light Logic
-                if (item.type === 'light') {
-                    const isAttachedToMesh = parent && parent.type === 'object';
-                    const visualHelper = item.objectRef.children.find(c => c.isMesh);
-                    if (visualHelper) visualHelper.visible = !isAttachedToMesh;
-                    const isInsidePart = parentItem && parentItem.type === 'object';
-                    
-                    if (isAttachedToMesh) item.objectRef.position.set(0, 0, 0);
-                    // Toggle the "bulb" helper: Hide it if parented to a part
-                    const helper = item.objectRef.children.find(c => c.isMesh);
-                    if (helper) helper.visible = !isInsidePart;
-                    
-                    // If inside a part, center the light source within it
-                    if (isInsidePart) item.objectRef.position.set(0, 0, 0);
-                    
-                    const lp = item.properties || {};
-                    const light = item.objectRef.children.find(c => c.isLight);
-                    if (light) {
-                        light.intensity = lp.intensity || 1;
-                        light.distance = lp.range || 100;
-                        light.intensity = lp.intensity ?? 1;
-                        light.distance = lp.range ?? 100;
-                        light.color.set(lp.color || '#ffffff');
+                // Sync Light Properties
+                if (item.type === 'light' && item.objectRef) {
+                    const lp = item.properties || { intensity: 1, range: 10, color: '#ffffff', castShadow: true };
+                    item.objectRef.intensity = (lp.intensity ?? 1) * 40; // Balanced for zero decay
+                    item.objectRef.distance = lp.range ?? 10;
+                    item.objectRef.decay = 0; // Constant intensity until range limit: makes brightest part reach the edge
+                    item.objectRef.color.set(lp.color || '#ffffff');
+                    item.objectRef.castShadow = lp.castShadow !== false;
+
+                    // Configure shadow resolution for point lights
+                    if (item.objectRef.castShadow && item.objectRef.shadow) {
+                        item.objectRef.shadow.mapSize.set(1024, 1024);
+                        item.objectRef.shadow.bias = -0.002; 
+                        // Greatly increased buffer for shadow camera far plane to prevent clipping at long ranges
+                        item.objectRef.shadow.camera.far = Math.max((lp.range || 50) * 2.0, 100);
+                        
+                        // If parented to an object, adjust near plane to prevent the parent from blocking light
+                        if (parentItem && parentItem.type === 'object') {
+                            const s = parentItem.objectRef.scale;
+                            const radius = Math.sqrt(s.x*s.x + s.y*s.y + s.z*s.z) * 0.6;
+                            item.objectRef.shadow.camera.near = Math.min(Math.max(0.1, radius), 5.0); // Cap near plane to prevent extreme clipping
+                        } else {
+                            item.objectRef.shadow.camera.near = 0.1;
+                        }
+                    }
+
+                    // If parented to a physical object, center it to emit light FROM that object
+                    if (parentItem && parentItem.type === 'object') {
+                        item.objectRef.position.set(0, 0, 0);
                     }
                 }
             } else {
@@ -178,7 +186,13 @@ let dynamicProps = document.getElementById('dynamic-properties');
 if (!dynamicProps) {
     dynamicProps = document.createElement('div');
     dynamicProps.id = 'dynamic-properties';
-    propertyControls.appendChild(dynamicProps);
+    // Insert after the Name field (first .prop-group) so Name stays at the top
+    const nameGroup = nameInput.closest('.prop-group');
+    if (nameGroup && nameGroup.nextSibling) {
+        propertyControls.insertBefore(dynamicProps, nameGroup.nextSibling);
+    } else {
+        propertyControls.appendChild(dynamicProps);
+    }
 }
 
 const colorPicker = document.getElementById('prop-color');
@@ -188,6 +202,7 @@ const rotInputs = { x: document.getElementById('prop-rot-x'), y: document.getEle
 const scaleInputs = { x: document.getElementById('prop-scale-x'), y: document.getElementById('prop-scale-y'), z: document.getElementById('prop-scale-z') };
 const anchoredInput = document.getElementById('prop-anchored');
 const collideInput = document.getElementById('prop-collide');
+const castShadowInput = document.getElementById('prop-cast-shadow');
 const opacityInput = document.getElementById('prop-opacity');
 const roughnessInput = document.getElementById('prop-roughness');
 const explorerMenu = document.getElementById('explorer-menu');
@@ -205,9 +220,24 @@ export const explorerHierarchy = {
         if (!world) {
             world = { id: 'world-folder', type: 'folder', name: 'World', children: [], isProtected: true };
             this.items.push(world);
+
+            // Add Terrain folder inside World
+            const terrain = {
+                id: 'folder-terrain',
+                type: 'folder',
+                name: 'Terrain',
+                children: [],
+                isProtected: true,
+                folderIcon: '🏔️',
+                properties: { material: 'Grass' }
+            };
+            world.children.push(terrain);
+
             // Add Baseplate to explorer
-            const bpItem = { id: 'obj-baseplate', type: 'object', name: 'Baseplate', objectRef: baseplate, isProtected: false };
+            const bpItem = { id: 'obj-baseplate', type: 'object', name: 'Baseplate', objectRef: baseplate, isProtected: false, children: [] };
             world.children.push(bpItem);
+
+            this.expanded['folder-terrain'] = true;
             this.expanded['world-folder'] = true;
         }
         return world;
@@ -216,11 +246,8 @@ export const explorerHierarchy = {
     initializeDefaultFolders() {
         const defaultFolders = [
             { name: 'Lighting', icon: '💡', properties: { brightness: 1, ambient: 0.4, sunDirection: { x: 50, y: 100, z: 50 } } },
-            { name: 'Camera', icon: '📷', properties: { viewDistance: 500, fov: 75 } },
             { name: 'UI', icon: '🎨', properties: { scaleMode: 'scale', enabled: true } },
-            { name: 'Terrain', icon: '🏔️', properties: { material: 'Grass' } },
             { name: 'Audio', icon: '🔊', properties: {} },
-            { name: 'Effects', icon: '✨', properties: {} },
             { name: 'Scripting', icon: '📝', properties: {} }
         ];
 
@@ -433,9 +460,9 @@ function renderExplorerItem(item, depth = 0) {
             { type: 'create', label: 'Part', objectType: 'Object' },
             { type: 'create', label: 'Folder', objectType: 'Folder' },
             { type: 'create', label: 'Model', objectType: 'Model' },
-            { type: 'divider' },
             { type: 'create', label: '💡 Light', objectType: 'Light' },
-            { type: 'create', label: '🔊 Sound', objectType: 'Sound' },
+            { type: 'divider' },
+            { type: 'create', label: ' Sound', objectType: 'Sound' },
             { type: 'divider' },
             { type: 'create', label: '✨ Bloom', objectType: 'Bloom' },
             { type: 'create', label: '🌫️ Fog', objectType: 'Fog' },
@@ -497,29 +524,23 @@ function renderExplorerItem(item, depth = 0) {
         e.preventDefault();
         e.stopPropagation();
         
+        itemEl.click(); // Automatically select the item on right-click
         showRightClickMenu(e.pageX, e.pageY, item.id);
     });
     
     // Click to select object (or select all in container)
     itemEl.onclick = (e) => {
         e.stopPropagation();
-        
-        if (item.type === 'folder' || item.type === 'model' || item.type === 'light' || item.type === 'effect' || item.type === 'sound') {
-            // Select the folder/model itself for property editing
-            state.currentSelectedItem = item;
-            
-            // Also select all objects inside this folder/model if it's a container
-            if (item.children) {
-                const allObjects = explorerHierarchy.getAllObjectsInItem(item.id);
-                if (allObjects.length > 0) {
-                    clearSelection();
-                    allObjects.forEach((obj, i) => attachTool(obj, i > 0));
-                }
+        state.currentSelectedItem = item;
+
+        // If it's a container, select children visually
+        if ((item.type === 'folder' || item.type === 'model') && item.children) {
+            const allObjects = explorerHierarchy.getAllObjectsInItem(item.id);
+            if (allObjects.length > 0) {
+                clearSelection();
+                allObjects.forEach((obj, i) => attachTool(obj, i > 0));
             }
-            showInspector();
         } else if (item.objectRef) {
-            // For objects, check if they're inside a model - if so, select all in that model
-            state.currentSelectedItem = null;
             const modelParent = findModelParent(item.id);
             if (modelParent) {
                 const allInModel = explorerHierarchy.getAllObjectsInItem(modelParent.id);
@@ -531,6 +552,7 @@ function renderExplorerItem(item, depth = 0) {
                 attachTool(item.objectRef, e.shiftKey);
             }
         }
+        showInspector();
     };
     
     // Drag and drop
@@ -679,18 +701,25 @@ export function updatePropertyValues() {
     
     if (state.selectedObjects.length === 1) {
         const obj = state.selectedObjects[0];
+        if (obj.isLight) return; // Lights don't have physical transform properties to display
+
         obj.getWorldPosition(worldPos); 
-        obj.getWorldQuaternion(worldQuat); 
+        if (obj.getWorldQuaternion) obj.getWorldQuaternion(worldQuat); 
         obj.getWorldScale(worldScale);
-        anchoredInput.checked = obj.userData.anchored !== false;
-        collideInput.checked = obj.userData.canCollide !== false;
-        roughnessInput.value = (obj.material && obj.material.roughness !== undefined) ? obj.material.roughness.toFixed(2) : 0.8;
-        opacityInput.value = obj.userData.opacity !== undefined ? obj.userData.opacity : 1;
-        if (obj.material && obj.material.transparent) {
-            obj.material.opacity = opacityInput.value;
+        
+        // Only set material properties if the object actually has a material
+        if (obj.material) {
+            anchoredInput.checked = obj.userData.anchored !== false;
+            collideInput.checked = obj.userData.canCollide !== false;
+            if (castShadowInput) castShadowInput.checked = obj.castShadow !== false;
+            roughnessInput.value = (obj.material && obj.material.roughness !== undefined) ? obj.material.roughness.toFixed(2) : 0.8;
+            opacityInput.value = obj.userData.opacity !== undefined ? obj.userData.opacity : 1;
+            if (obj.material && obj.material.transparent) {
+                obj.material.opacity = opacityInput.value;
+            }
+            tileScaleXInput.value = obj.userData.tileScaleX || 1;
+            tileScaleYInput.value = obj.userData.tileScaleY || 1;
         }
-        tileScaleXInput.value = obj.userData.tileScaleX || 1;
-        tileScaleYInput.value = obj.userData.tileScaleY || 1;
     } else {
         // For multi-select, read the center of the selection group
         worldPos.copy(selectionGroup.position);
@@ -698,6 +727,7 @@ export function updatePropertyValues() {
         worldScale.copy(selectionGroup.scale);
         anchoredInput.checked = state.selectedObjects.every(o => o.userData.anchored !== false);
         collideInput.checked = state.selectedObjects.every(o => o.userData.canCollide !== false);
+        if (castShadowInput) castShadowInput.checked = state.selectedObjects.every(o => o.castShadow !== false);
     }
     
     worldEuler.setFromQuaternion(worldQuat);
@@ -715,7 +745,9 @@ export function updatePropertyValues() {
     scaleInputs.z.value = worldScale.z.toFixed(2);
 
     // Recalculate UVs whenever properties (like scale) change
-    state.selectedObjects.forEach(obj => updateObjectUVs(obj));
+    state.selectedObjects.forEach(obj => {
+        if (obj.isMesh) updateObjectUVs(obj);
+    });
 }
 
 nameInput.oninput = () => {
@@ -750,6 +782,15 @@ collideInput.onchange = () => {
         obj.userData.canCollide = collideInput.checked;
     });
 };
+
+if (castShadowInput) {
+    castShadowInput.onchange = () => {
+        state.selectedObjects.forEach(obj => {
+            obj.castShadow = castShadowInput.checked;
+            obj.userData.castShadow = castShadowInput.checked;
+        });
+    };
+}
 
 opacityInput.oninput = () => {
     const opacityValue = parseFloat(opacityInput.value);
@@ -895,35 +936,92 @@ tileScaleYInput.oninput = handleTileUpdate;
 // Initialize on load
 initMaterialDropdown();
 
-export function showInspector() {
-    const currentItem = state.currentSelectedItem;
+function createPropertyControl(label, value, type, onChange) {
+    const container = document.createElement('div');
+    container.className = 'prop-group';
     
-    // If a folder/model is selected, show its properties
-    if (currentItem && (currentItem.type === 'folder' || currentItem.type === 'model' || currentItem.type === 'effect' || currentItem.type === 'sound')) {
-        propertyControls.style.display = 'flex';
-        noSelectionText.style.display = 'none';
-        
-        nameInput.value = currentItem.name;
-        nameInput.disabled = currentItem.isProtected;
-        colorPicker.parentElement.style.opacity = "0.5";
-        deleteBtn.style.visibility = (currentItem.isProtected) ? 'hidden' : 'visible';
-        
-        // Hide object-specific properties
-        colorPicker.parentElement.parentElement.style.display = 'none'; // Color
-        document.getElementById('prop-material').parentElement.style.display = 'none'; // Material
-        document.getElementById('prop-roughness').parentElement.style.display = 'none'; // Roughness
-        document.getElementById('prop-tile-scale-x').parentElement.style.display = 'none'; // Tile scales
-        document.getElementById('prop-anchored').parentElement.style.display = 'none'; // Anchored
-        document.getElementById('prop-collide').parentElement.style.display = 'none'; // Can Collide
-        document.getElementById('prop-opacity').parentElement.style.display = 'none'; // Opacity
-        
-        // Clear position/rotation/scale inputs
-        posInputs.x.value = posInputs.y.value = posInputs.z.value = 0;
-        rotInputs.x.value = rotInputs.y.value = rotInputs.z.value = 0;
-        scaleInputs.x.value = scaleInputs.y.value = scaleInputs.z.value = 1;
-        
-        // Show folder-specific properties if they exist
-        if (currentItem.properties) {
+    // For checkbox, use the same flex layout as static properties
+    if (type === 'boolean') {
+        container.style.display = 'flex';
+        container.style.alignItems = 'center';
+        container.style.justifyContent = 'space-between';
+    }
+    
+    const labelEl = document.createElement('label');
+    labelEl.className = 'prop-label';
+    if (type === 'boolean') {
+        labelEl.style.marginBottom = '0';
+    }
+    labelEl.innerText = label.replace(/([A-Z])/g, ' $1')
+                               .replace(/^./, str => str.toUpperCase());
+    container.appendChild(labelEl);
+
+    const input = document.createElement('input');
+    if (type === 'color') {
+        input.type = 'color';
+        input.value = value;
+        input.style.cssText = 'width: 100%; height: 28px; border: none; background: none; cursor: pointer;';
+    } else if (type === 'boolean') {
+        input.type = 'checkbox';
+        input.checked = value;
+        input.style.cssText = 'width: 18px; height: 18px; cursor: pointer;';
+    } else {
+        input.type = 'number';
+        input.value = value;
+        input.step = '0.1';
+        input.className = 'prop-input';
+        input.style.width = '100px';
+    }
+
+    input.oninput = (e) => {
+        const newVal = type === 'boolean' ? e.target.checked : (type === 'number' ? parseFloat(e.target.value) : e.target.value);
+        onChange(newVal);
+    };
+
+    container.appendChild(input);
+    return container;
+}
+
+export function showInspector() {
+    // Sync the hierarchy item if we have a single 3D object selected but no item reference
+    // This ensures that clicking a Light in the 3D view still shows its properties
+    if (state.selectedObjects.length === 1 && !state.currentSelectedItem) {
+        const itemId = findItemIdForObject(state.selectedObjects[0]);
+        if (itemId) state.currentSelectedItem = explorerHierarchy.findItemById(itemId);
+    }
+
+    const currentItem = state.currentSelectedItem;
+    dynamicProps.innerHTML = '';
+
+    // Ensure we have something to inspect
+    if (!currentItem && (!state.selectedObjects || state.selectedObjects.length === 0)) {
+        propertyControls.style.display = 'none';
+        noSelectionText.style.display = 'block';
+        return;
+    }
+
+    const isPhysical = currentItem?.type === 'object' || state.selectedObjects.some(obj => obj.isMesh);
+    const isLight = currentItem?.type === 'light' || state.selectedObjects.some(obj => obj.isLight);
+
+    propertyControls.style.display = 'flex';
+    noSelectionText.style.display = 'none';
+
+    // 0. Unique/Dynamic Properties (e.g. Lights, Audio, Effects)
+    if (currentItem && currentItem.properties) {
+        if (isLight) {
+            const lightProps = ['intensity', 'range', 'color', 'castShadow'];
+            lightProps.forEach(key => {
+                const val = currentItem.properties[key];
+                let type = typeof val === 'number' ? 'number' : (typeof val === 'boolean' ? 'boolean' : 'color');
+                if (key.toLowerCase().includes('color')) type = 'color';
+
+                const control = createPropertyControl(key, val, type, (newVal) => {
+                    currentItem.properties[key] = type === 'number' ? parseFloat(newVal) : newVal;
+                    refreshSceneState();
+                });
+                dynamicProps.appendChild(control);
+            });
+        } else {
             Object.keys(currentItem.properties).forEach(key => {
                 const val = currentItem.properties[key];
                 let type = typeof val === 'number' ? 'number' : (typeof val === 'boolean' ? 'boolean' : 'color');
@@ -936,58 +1034,77 @@ export function showInspector() {
                 dynamicProps.appendChild(control);
             });
         }
-        
-        updateExplorer();
-        return;
+        dynamicProps.style.display = 'block';
+        dynamicProps.style.borderBottom = "1px solid #444";
+        dynamicProps.style.paddingBottom = "10px";
+        dynamicProps.style.marginBottom = "10px";
+    } else {
+        dynamicProps.style.display = 'none';
     }
-    
-    // Regular object selection
-    if (state.selectedObjects.length > 0) {
-        propertyControls.style.display = 'flex'; 
-        noSelectionText.style.display = 'none';
-        
-        // Show object-specific properties again
-        colorPicker.parentElement.parentElement.style.display = 'block';
-        document.getElementById('prop-material').parentElement.style.display = 'block';
-        document.getElementById('prop-roughness').parentElement.style.display = 'block';
-        document.getElementById('prop-tile-scale-x').parentElement.style.display = 'block';
-        document.getElementById('prop-anchored').parentElement.style.display = 'block';
-        document.getElementById('prop-collide').parentElement.style.display = 'block';
-        document.getElementById('prop-opacity').parentElement.style.display = 'block';
-        
-        if (state.selectedObjects.length > 1) {
-            nameInput.value = "Multiple Objects";
-            nameInput.disabled = true;
-            colorPicker.parentElement.style.opacity = "0.5";
-            deleteBtn.style.visibility = 'visible';
-            materialSelect.value = '';
-            roughnessInput.value = 0.8;
-            tileScaleXInput.value = 1;
-            tileScaleYInput.value = 1;
-        } else {
-            const target = state.selectedObjects[0];
-            nameInput.value = target.name;
-            nameInput.disabled = false;
+
+    // 1. Basic Info (Name/Delete)
+    nameInput.value = currentItem ? currentItem.name : (state.selectedObjects.length > 1 ? "Multiple Objects" : state.selectedObjects[0].name);
+    nameInput.disabled = currentItem?.isProtected || state.selectedObjects.length > 1;
+    deleteBtn.style.visibility = currentItem?.isProtected ? 'hidden' : 'visible';
+
+    // 2. Physical Properties Visibility
+    const physPropIds = ['prop-material', 'prop-roughness', 'prop-tile-scale-x', 'prop-anchored', 'prop-collide', 'prop-opacity', 'prop-cast-shadow'];
+    // Only show physical props for actual parts/meshes, never for lights (they use dynamic ones)
+    const showPhysical = isPhysical;
+
+    colorPicker.parentElement.style.display = showPhysical ? 'block' : 'none';
+    physPropIds.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            const group = el.closest('.prop-group');
+            if (group) group.style.display = showPhysical ? 'block' : 'none';
+        }
+    });
+
+    // 3. Transform (Position/Rotation/Scale)
+    const hasTransform = showPhysical;
+    if (hasTransform) {
+        updatePropertyValues();
+        document.querySelectorAll('.prop-group-transform').forEach(el => el.style.display = 'block');
+    } else {
+        document.querySelectorAll('.prop-group-transform').forEach(el => el.style.display = 'none');
+    }
+
+    // 4. Sync Material UI if single physical object
+    if (isPhysical && state.selectedObjects.length === 1) {
+        const target = state.selectedObjects[0];
+        if (target.material && target.material.color) {
             colorPicker.value = '#' + target.material.color.getHexString();
             colorPicker.parentElement.style.opacity = "1";
-            deleteBtn.style.visibility = 'visible';
-            
-            // Update material and tile scale
             materialSelect.value = target.userData.material || '';
-            roughnessInput.value = target.material.roughness !== undefined ? target.material.roughness : 0.8;
-            tileScaleXInput.value = target.userData.tileScaleX || 1;
-            tileScaleYInput.value = target.userData.tileScaleY || 1;
+            roughnessInput.value = target.material.roughness ?? 0.8;
         }
-        // Moved this outside the if/else so it updates fields for BOTH single and multi-select
-        updatePropertyValues();
+    } else if (isLight && state.selectedObjects.length === 1) {
+        const target = state.selectedObjects[0];
+        if (target.color) {
+            colorPicker.value = '#' + target.color.getHexString();
+            colorPicker.parentElement.style.opacity = "1";
+        }
     } else {
-        propertyControls.style.display = 'none';
-        noSelectionText.style.display = 'block';
+        colorPicker.parentElement.style.opacity = "0.5";
     }
+
     updateExplorer();
 }
 
-colorPicker.oninput = () => { state.selectedObjects.forEach(obj => { if (obj.material) obj.material.color.set(colorPicker.value); }); };
+colorPicker.oninput = () => { 
+    const hex = colorPicker.value;
+    state.selectedObjects.forEach(obj => { 
+        if (obj.material) obj.material.color.set(hex); 
+        if (obj.isLight) {
+            obj.color.set(hex);
+            // Sync back to item properties so refreshSceneState doesn't override it
+            const itemId = findItemIdForObject(obj);
+            const item = explorerHierarchy.findItemById(itemId);
+            if (item && item.properties) item.properties.color = hex;
+        }
+    }); 
+};
 
 anchoredInput.onchange = () => {
     state.selectedObjects.forEach(obj => {
@@ -1015,6 +1132,7 @@ function createObjectInFolder(parentId, type) {
         const objName = explorerHierarchy.getNextName('object');
         mesh.name = objName;
         mesh.userData.anchored = true;
+        mesh.userData.castShadow = true;
         mesh.userData.canCollide = true;
         mesh.userData.velocity = new THREE.Vector3(0, 0, 0);
         
@@ -1023,57 +1141,47 @@ function createObjectInFolder(parentId, type) {
         placeOnTargetSurface(mesh);
         
         // Add to hierarchy
-        const item = { id: `obj-${Date.now()}-${Math.floor(Math.random() * 1000)}`, type: 'object', name: objName, objectRef: mesh };
+        const item = { id: `obj-${Date.now()}-${Math.floor(Math.random() * 1000)}`, type: 'object', name: objName, objectRef: mesh, children: [] };
         parent.children.push(item);
         explorerHierarchy.expanded[parentId] = true;
         attachTool(mesh, false);
-        
+
     } else if (type === 'Light') {
-        const lightName = explorerHierarchy.getNextName('light');
-        const lightGroup = new THREE.Group();
-        const light = new THREE.PointLight(0xffffff, 1, 100);
-        light.castShadow = true;
-        const visual = new THREE.Mesh(
-            new THREE.SphereGeometry(0.5, 8, 8),
-            new THREE.MeshBasicMaterial({ color: 0xffff00, wireframe: true })
-        );
-        lightGroup.add(light);
-        lightGroup.add(visual);
-        lightGroup.name = lightName;
-        
-        state.selectableObjects.push(lightGroup);
-        placeOnTargetSurface(lightGroup);
+        const light = new THREE.PointLight(0xffffff, 1, 10);
+        const name = explorerHierarchy.getNextName('light');
+        scene.add(light);
         
         const item = { 
-            id: `light-${Date.now()}`, type: 'light', name: lightName, objectRef: lightGroup,
-            properties: { intensity: 1, range: 100, color: '#ffffff' }
+            id: `light-${Date.now()}`, type: 'light', name: name, objectRef: light,
+            properties: { intensity: 1, range: 10, color: '#ffffff', castShadow: true },
+            children: []
         };
         parent.children.push(item);
-        refreshSceneState();
-        attachTool(lightGroup, false);
-        
+
+        if (parent.type === 'object') {
+            light.position.set(0, 0, 0);
+        } else {
+            placeOnTargetSurface(light);
+        }
+
     } else if (type === 'Bloom') {
         const bloomName = explorerHierarchy.getNextName('bloom');
         const item = { id: `bloom-${Date.now()}`, type: 'effect', subType: 'bloom', name: bloomName, properties: { strength: 1.5, radius: 0.4, threshold: 0.85 } };
         parent.children.push(item);
-        refreshSceneState();
         
     } else if (type === 'SunRays') {
         const sunraysName = explorerHierarchy.getNextName('sunrays');
         const item = { id: `sunrays-${Date.now()}`, type: 'effect', subType: 'sunrays', name: sunraysName, properties: { intensity: 2 } };
         parent.children.push(item);
-        refreshSceneState();
         
     } else if (type === 'Fog') {
         const fogName = explorerHierarchy.getNextName('fog');
         const item = { id: `fog-${Date.now()}`, type: 'effect', subType: 'fog', name: fogName, properties: { color: '#87CEEB', density: 0.01 } };
         parent.children.push(item);
-        refreshSceneState();
     } else if (type === 'ParticleEmitter') {
         const name = explorerHierarchy.getNextName('particle');
         const item = { id: `parti-${Date.now()}`, type: 'effect', subType: 'particle', name: name, properties: { rate: 100, lifetime: 3, speed: 5 } };
         parent.children.push(item);
-        refreshSceneState();
     } else if (type === 'Sound') {
         const name = explorerHierarchy.getNextName('sound');
         const item = { id: `snd-${Date.now()}`, type: 'sound', name: name, properties: { volume: 0.5, pitch: 1, looped: false } };
@@ -1101,6 +1209,7 @@ function createObjectInFolder(parentId, type) {
     }
     
     explorerHierarchy.expanded[parentId] = true;
+    refreshSceneState();
     updateExplorer();
 }
 
@@ -1159,20 +1268,14 @@ export function showRightClickMenu(x, y, contextId = null) {
         menuItems.push({ type: 'create', label: 'Add Part', objectType: 'Object' });
         menuItems.push({ type: 'create', label: 'Add Folder', objectType: 'Folder' });
         menuItems.push({ type: 'create', label: 'Add Model', objectType: 'Model' });
+        menuItems.push({ type: 'create', label: 'Add Light', objectType: 'Light' });
         
         // Context-specific items
         if (folderName === 'Lighting') {
             menuItems.push({ type: 'divider' });
-            menuItems.push({ type: 'create', label: '💡 Add Light', objectType: 'Light' });
             menuItems.push({ type: 'create', label: '✨ Add Bloom', objectType: 'Bloom' });
             menuItems.push({ type: 'create', label: '☀️ Add Sun Rays', objectType: 'SunRays' });
             menuItems.push({ type: 'create', label: '🌫️ Add Fog', objectType: 'Fog' });
-        } else if (folderName === 'Effects') {
-            menuItems.push({ type: 'divider' });
-            menuItems.push({ type: 'create', label: '✨ Add Bloom', objectType: 'Bloom' });
-            menuItems.push({ type: 'create', label: '☀️ Add Sun Rays', objectType: 'SunRays' });
-            menuItems.push({ type: 'create', label: '🌫️ Add Fog', objectType: 'Fog' });
-            menuItems.push({ type: 'create', label: '💫 Add Particle Emitter', objectType: 'ParticleEmitter' });
         } else if (folderName === 'Audio') {
             menuItems.push({ type: 'divider' });
             menuItems.push({ type: 'create', label: '🔊 Add Sound', objectType: 'Sound' });
@@ -1184,7 +1287,6 @@ export function showRightClickMenu(x, y, contextId = null) {
         } else {
             // For other folders/models, show general options
             menuItems.push({ type: 'divider' });
-            menuItems.push({ type: 'create', label: '💡 Light', objectType: 'Light' });
             menuItems.push({ type: 'create', label: '🔊 Sound', objectType: 'Sound' });
         }
         
@@ -1342,16 +1444,16 @@ window.deleteSelected = () => {
     const idsToDelete = new Set();
     
     // 1. Determine what to delete
-    if (contextItem && (contextItem.type === 'folder' || contextItem.type === 'model')) {
+    if (contextItem) {
+        // Prioritize the right-clicked context item
         idsToDelete.add(currentContextId);
     } else if (state.selectedObjects.length > 0) {
+        // Fallback to general selection
         state.selectedObjects.forEach(obj => {
             if (!obj) return; // Defensive check
             const id = findItemIdForObject(obj);
             if (id) idsToDelete.add(id);
         });
-    } else if (currentContextId) {
-        idsToDelete.add(currentContextId);
     }
 
     if (idsToDelete.size === 0) return;
@@ -1418,6 +1520,12 @@ export function attachTool(obj, isMulti = false) {
     const currentChildren = [...selectionGroup.children].filter(c => c !== selectionBox && c !== scaleHandles);
     currentChildren.forEach(child => scene.attach(child));
 
+    // Immediate hierarchy sync when selecting an object
+    if (!isMulti) {
+        const itemId = findItemIdForObject(obj);
+        if (itemId) state.currentSelectedItem = explorerHierarchy.findItemById(itemId);
+    }
+
     // Check if this object is inside a model - if so, select all in the model
     const modelParent = findModelParent(findItemIdForObject(obj));
     if (modelParent && !isMulti) {
@@ -1444,7 +1552,11 @@ export function attachTool(obj, isMulti = false) {
     else selectionGroup.rotation.set(0, 0, 0); 
     
     selectionGroup.scale.set(1, 1, 1); selectionGroup.updateMatrixWorld(true);
-    state.selectedObjects.forEach(o => selectionGroup.attach(o));
+    
+    // Only physically attach meshes/groups, don't move lights into the tool group
+    state.selectedObjects.forEach(o => {
+        if (!o.isLight) selectionGroup.attach(o);
+    });
 
     const tightBox = new THREE.Box3(), inverseGroupMatrix = selectionGroup.matrixWorld.clone().invert();
     state.selectedObjects.forEach(o => {
@@ -1557,7 +1669,7 @@ export function pasteSelection() {
         mesh.quaternion.copy(data.rotation);
         mesh.scale.copy(data.scale);
         mesh.userData = JSON.parse(JSON.stringify(data.userData));
-        mesh.castShadow = true;
+        mesh.castShadow = data.userData.castShadow !== false;
         mesh.receiveShadow = true;
         scene.add(mesh);
         state.selectableObjects.push(mesh);
@@ -1602,6 +1714,7 @@ const createShape = (isModelTab = false) => {
     mesh.name = meshName;
     
     mesh.userData.anchored = true;
+    mesh.userData.castShadow = true;
     mesh.userData.canCollide = true;
     mesh.userData.velocity = new THREE.Vector3(0, 0, 0);
     mesh.userData.originalTransform = null;
@@ -1611,7 +1724,7 @@ const createShape = (isModelTab = false) => {
     
     // Add to World folder in hierarchy
     const worldFolder = explorerHierarchy.getOrCreateWorld();
-    const hierarchyItem = { id: `obj-${Date.now()}`, type: 'object', name: mesh.name, objectRef: mesh };
+    const hierarchyItem = { id: `obj-${Date.now()}`, type: 'object', name: mesh.name, objectRef: mesh, children: [] };
     worldFolder.children.push(hierarchyItem);
     
     placeOnTargetSurface(mesh); 
