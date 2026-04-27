@@ -192,18 +192,20 @@ export function duplicateSelection() {
         clonedMesh.geometry = original.geometry.clone();
         clonedMesh.material = original.material.clone();
         clonedMesh.name = original.name + " (Duplicate)";
+        clonedMesh.userData = JSON.parse(JSON.stringify(original.userData || {}));
         
         scene.add(clonedMesh);
         clonedMesh.position.copy(worldPos);
         clonedMesh.quaternion.copy(worldQuat);
         clonedMesh.scale.copy(worldScale);
+        clonedMesh.castShadow = original.castShadow;
 
         state.selectableObjects.push(clonedMesh);
         newSelections.push(clonedMesh);
         
         // Add to hierarchy so the editor knows this object exists
         const worldFolder = explorerHierarchy.getOrCreateWorld();
-        const hierarchyItem = { id: `obj-${Date.now()}-${Math.floor(Math.random() * 1000)}`, type: 'object', name: clonedMesh.name, objectRef: clonedMesh };
+        const hierarchyItem = { id: `obj-${Date.now()}-${Math.floor(Math.random() * 1000)}`, type: 'object', name: clonedMesh.name, objectRef: clonedMesh, children: [] };
         worldFolder.children.push(hierarchyItem);
     });
 
