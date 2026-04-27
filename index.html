@@ -161,7 +161,7 @@
                 <label class="prop-label">Color</label>
                 <input type="color" id="prop-color" style="width: 100%; height: 25px; border: none; background: none; cursor: pointer;">
             </div>
-            <div class="prop-group">
+            <div class="prop-group prop-group-transform">
                 <label class="prop-label">Position</label>
                 <div class="num-row">
                     <input type="number" id="prop-pos-x" step="0.1" class="prop-input">
@@ -169,7 +169,7 @@
                     <input type="number" id="prop-pos-z" step="0.1" class="prop-input">
                 </div>
             </div>
-            <div class="prop-group">
+            <div class="prop-group prop-group-transform">
                 <label class="prop-label">Rotation (deg)</label>
                 <div class="num-row">
                     <input type="number" id="prop-rot-x" class="prop-input">
@@ -177,7 +177,7 @@
                     <input type="number" id="prop-rot-z" class="prop-input">
                 </div>
             </div>
-            <div class="prop-group">
+            <div class="prop-group prop-group-transform">
                 <label class="prop-label">Scale</label>
                 <div class="num-row">
                     <input type="number" id="prop-scale-x" step="0.1" class="prop-input" value="1">
@@ -193,6 +193,10 @@
             <div class="prop-group" style="display: flex; align-items: center; justify-content: space-between;">
                 <label class="prop-label" style="margin-bottom: 0;">Can Collide</label>
                 <input type="checkbox" id="prop-collide" checked>
+            </div>
+            <div class="prop-group" style="display: flex; align-items: center; justify-content: space-between;">
+                <label class="prop-label" style="margin-bottom: 0;">Cast Shadow</label>
+                <input type="checkbox" id="prop-cast-shadow" checked>
             </div>
             <div class="prop-group">
                 <div class="num-row">
