@@ -204,8 +204,11 @@ const anchoredInput = document.getElementById('prop-anchored');
 const collideInput = document.getElementById('prop-collide');
 const castShadowInput = document.getElementById('prop-cast-shadow');
 const opacityInput = document.getElementById('prop-opacity');
+const normalInput = document.getElementById('prop-normal');
 const roughnessInput = document.getElementById('prop-roughness');
+const reflectionInput = document.getElementById('prop-reflection');
 const explorerMenu = document.getElementById('explorer-menu');
+
 
 document.getElementById('right-sidebar').addEventListener('mousedown', (e) => e.stopPropagation());
 
@@ -693,6 +696,7 @@ export function updateObjectUVs(obj) {
 
 export function updatePropertyValues() {
     if (state.selectedObjects.length === 0) return;
+
     
     let worldPos = new THREE.Vector3();
     let worldQuat = new THREE.Quaternion();
@@ -702,6 +706,10 @@ export function updatePropertyValues() {
     if (state.selectedObjects.length === 1) {
         const obj = state.selectedObjects[0];
         if (obj.isLight) return; // Lights don't have physical transform properties to display
+
+        // Ensure reflection property exists on the mesh
+        obj.userData.reflection = obj.userData.reflection ?? 0;
+
 
         obj.getWorldPosition(worldPos); 
         if (obj.getWorldQuaternion) obj.getWorldQuaternion(worldQuat); 
@@ -713,14 +721,20 @@ export function updatePropertyValues() {
             collideInput.checked = obj.userData.canCollide !== false;
             if (castShadowInput) castShadowInput.checked = obj.castShadow !== false;
             roughnessInput.value = (obj.material && obj.material.roughness !== undefined) ? obj.material.roughness.toFixed(2) : 0.8;
+            normalInput.value = (obj.material && obj.material.normalScale) ? obj.material.normalScale.x : 0.5;
             opacityInput.value = obj.userData.opacity !== undefined ? obj.userData.opacity : 1;
             if (obj.material && obj.material.transparent) {
                 obj.material.opacity = opacityInput.value;
             }
             tileScaleXInput.value = obj.userData.tileScaleX || 1;
             tileScaleYInput.value = obj.userData.tileScaleY || 1;
+            reflectionInput.value = obj.userData.reflection ?? 0;
+            applyReflectionToObject(obj);
+
         }
+
     } else {
+
         // For multi-select, read the center of the selection group
         worldPos.copy(selectionGroup.position);
         worldQuat.copy(selectionGroup.quaternion);
@@ -732,16 +746,16 @@ export function updatePropertyValues() {
     
     worldEuler.setFromQuaternion(worldQuat);
 
-    posInputs.x.value = worldPos.x.toFixed(2); 
-    posInputs.y.value = worldPos.y.toFixed(2); 
+    posInputs.x.value = worldPos.x.toFixed(2);
+    posInputs.y.value = worldPos.y.toFixed(2);
     posInputs.z.value = worldPos.z.toFixed(2);
-    
-    rotInputs.x.value = THREE.MathUtils.radToDeg(worldEuler.x).toFixed(0); 
-    rotInputs.y.value = THREE.MathUtils.radToDeg(worldEuler.y).toFixed(0); 
+
+    rotInputs.x.value = THREE.MathUtils.radToDeg(worldEuler.x).toFixed(0);
+    rotInputs.y.value = THREE.MathUtils.radToDeg(worldEuler.y).toFixed(0);
     rotInputs.z.value = THREE.MathUtils.radToDeg(worldEuler.z).toFixed(0);
-    
-    scaleInputs.x.value = worldScale.x.toFixed(2); 
-    scaleInputs.y.value = worldScale.y.toFixed(2); 
+
+    scaleInputs.x.value = worldScale.x.toFixed(2);
+    scaleInputs.y.value = worldScale.y.toFixed(2);
     scaleInputs.z.value = worldScale.z.toFixed(2);
 
     // Recalculate UVs whenever properties (like scale) change
@@ -749,6 +763,7 @@ export function updatePropertyValues() {
         if (obj.isMesh) updateObjectUVs(obj);
     });
 }
+
 
 nameInput.oninput = () => {
     if (state.currentSelectedItem) {
@@ -812,13 +827,63 @@ roughnessInput.oninput = () => {
     });
 };
 
+reflectionInput.oninput = () => {
+    const reflectionValue = Math.max(0, Math.min(10, parseFloat(reflectionInput.value) || 0));
+    state.selectedObjects.forEach(obj => {
+        obj.userData.reflection = reflectionValue;
+        applyReflectionToObject(obj);
+    });
+};
+
+
+normalInput.oninput = () => {
+    const normalValue = parseFloat(normalInput.value);
+    state.selectedObjects.forEach(obj => {
+        if (obj.material) {
+            obj.material.normalScale.set(normalValue, normalValue);
+        }
+    });
+};
+
+
 // --- MATERIAL SYSTEM ---
 const materialSelect = document.getElementById('prop-material');
+
+function applyReflectionToObject(obj) {
+    if (!obj || !obj.material) return;
+    const reflectionValue = obj.userData.reflection ?? 0;
+    const t = Math.max(0, Math.min(10, Number(reflectionValue))) / 10;
+
+    // Make the surface progressively smoother and more specular.
+    if (obj.material.roughness !== undefined) {
+        // Reflection 0 -> roughness ~0.9, Reflection 10 -> roughness ~0.05
+        obj.material.roughness = 0.9 - (0.85 * t);
+        obj.material.roughness = Math.max(0.05, Math.min(1, obj.material.roughness));
+    }
+
+    // We also bias metalness upward so the specular highlights become strong.
+    if (obj.material.metalness !== undefined) {
+        obj.material.metalness = Math.max(0, Math.min(1, t * 1.0));
+    }
+
+    // Ensure there is some reflection contribution even with no envMap.
+    // (This is a fast hack: it pushes a stronger specular term via higher env intensity.)
+    if (obj.material.envMapIntensity !== undefined) {
+        obj.material.envMapIntensity = 0.0 + (t * 3.0);
+    }
+
+    // If we don't have an envMap, envMapIntensity won't help—but roughness/metalness still will.
+    obj.material.needsUpdate = true;
+}
+
+
+
 const tileScaleXInput = document.getElementById('prop-tile-scale-x');
 const tileScaleYInput = document.getElementById('prop-tile-scale-y');
 
 export const materials = {
-    list: ['Grass', 'Sand', 'Concrete', 'Bricks', 'Wood', 'WoodPlanks'],
+    // Keep this in sync with folders inside ./Materials
+    list: ['Bricks', 'Concrete', 'DiamondPlate', 'Dirt', 'Fabric', 'Grass', 'Metal', 'Neon', 'Rust', 'Sand', 'Tile', 'Wood', 'WoodPlanks'],
     cache: {},
     textureLoader: new THREE.TextureLoader(),
     
@@ -1755,4 +1820,3 @@ function updateSnap() {
     transformControls.translationSnap = state.snapAmount;
     transformControls.rotationSnap = THREE.MathUtils.degToRad(15 * state.snapAmount);
 }
-snapInput.oninput = updateSnap; updateSnap();
