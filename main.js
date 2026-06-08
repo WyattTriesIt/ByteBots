@@ -7,7 +7,7 @@ import {
     setMode, updateExplorer, updateToolUI, placeOnTargetSurface, refreshSceneState,
     copySelection, pasteSelection, findItemIdForObject, explorerHierarchy, selectHierarchyItem,
     updateObjectUVs, clipboard, findParentItem, duplicateSelected, findModelParent,
-    switchTab, makeTabPersistent,
+    switchTab, makeTabPersistent, updateSoundAttenuation,
     updateParticles
 } from './editor.js';
 import { renderSSRPrepass, godRaysPass } from './setup.js';
@@ -672,6 +672,7 @@ function togglePlayTest() {
         state.editorCameraTransform.position.copy(camera.position);
         state.editorCameraTransform.rotation.copy(camera.rotation);
         createAvatar();
+        setCameraIndicatorVisibility(false);
 
         // --- PLAYER SPAWN LOGIC ---
         const spawns = state.selectableObjects.filter(obj => {
@@ -718,6 +719,9 @@ function togglePlayTest() {
                 obj.updateMatrixWorld();
             }
         });
+        
+        // Restore camera indicators for editor mode
+        setCameraIndicatorVisibility(true);
 
         // Clean up physics properly
         physicsBodies.clear();
@@ -733,9 +737,29 @@ function togglePlayTest() {
         camera.position.copy(state.editorCameraTransform.position);
         camera.rotation.set(state.editorCameraTransform.rotation.x, state.editorCameraTransform.rotation.y, state.editorCameraTransform.rotation.z);
     }
+    refreshSceneState();
 }
 
 if (playTestBtn) playTestBtn.onclick = togglePlayTest;
+
+function setCameraIndicatorVisibility(visible) {
+    scene.traverse(obj => {
+        if (obj.userData?.isIndicator) {
+            obj.visible = visible;
+        }
+    });
+}
+
+function findEnabledCamera(items) {
+    for (let item of items) {
+        if (item.type === 'camera' && item.properties?.enabled) return item;
+        if (item.children) {
+            const found = findEnabledCamera(item.children);
+            if (found) return found;
+        }
+    }
+    return null;
+}
 
 const clock = new THREE.Clock();
 function animate() {
@@ -868,13 +892,25 @@ function animate() {
         }
 
         // --- 5. CAMERA (Gravity-Aligned) ---
-        // Find the player's head position based on current gravity orientation
-        const headPos = new THREE.Vector3(0, 1.2, 0)
-            .applyQuaternion(state.playerGroup.quaternion)
-            .add(state.playerGroup.position);
-
         // Calculate a rotation that aligns World-Up to our Local-Up
         const gravityAlignQuat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), localUp);
+        
+        const enabledCam = findEnabledCamera(explorerHierarchy.items);
+
+        if (enabledCam && enabledCam.objectRef) {
+            // Override with Camera Object
+            const camObj = enabledCam.objectRef;
+            camera.position.copy(camObj.getWorldPosition(new THREE.Vector3()));
+            camera.quaternion.copy(camObj.getWorldQuaternion(new THREE.Quaternion()));
+            camera.fov = enabledCam.properties.fov || 75;
+            camera.near = enabledCam.properties.near || 0.1;
+            camera.far = enabledCam.properties.far || 1000;
+            camera.updateProjectionMatrix();
+        } else if (state.playerGroup) {
+            // Standard Avatar Camera
+            const headPos = new THREE.Vector3(0, 1.2, 0)
+                .applyQuaternion(state.playerGroup.quaternion)
+                .add(state.playerGroup.position);
 
         if (state.isFirstPerson) {
             camera.position.copy(headPos);
@@ -900,6 +936,7 @@ function animate() {
             camera.position.copy(headPos.clone().add(worldOffset));
             camera.lookAt(headPos);
         }
+        }
 
     } else if (!isTyping) {
         // Editor Camera
@@ -920,6 +957,7 @@ function animate() {
 
     // Manage light budget for performance and stability
     manageLightPriority();
+    updateSoundAttenuation();
 
     // --- SUN RAYS UPDATE ---
     if (godRaysPass && godRaysPass.enabled) {

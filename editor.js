@@ -94,6 +94,8 @@ selectionGroup.add(selectionBox);
 export const scaleHandles = new THREE.Group();
 selectionGroup.add(scaleHandles); 
 
+const pRaycaster = new THREE.Raycaster(); // Private raycaster to prevent breaking editor selection
+
 const handleData = [
     { dir: new THREE.Vector3(1, 0, 0), color: 0xff0000 }, { dir: new THREE.Vector3(-1, 0, 0), color: 0xff0000 },
     { dir: new THREE.Vector3(0, 1, 0), color: 0x00ff00 }, { dir: new THREE.Vector3(0, -1, 0), color: 0x00ff00 },
@@ -161,8 +163,8 @@ export function updateParticles(dt) {
         item._spawnTimer -= spawnCount / rate;
 
         for (let i = 0; i < spawnCount; i++) {
-            if (data.length > 2000) break;
-            
+            // Population cap removed to allow creator-controlled limits
+
             const life = (p.lifeMin ?? 1) + Math.random() * ((p.lifeMax ?? 3) - (p.lifeMin ?? 1));
             const speed = (p.speedMin ?? 2) + Math.random() * ((p.speedMax ?? 5) - (p.speedMin ?? 2));
             const size = (p.sizeMin ?? 0.5) + Math.random() * ((p.sizeMax ?? 1) - (p.sizeMin ?? 0.5));
@@ -211,9 +213,82 @@ export function updateParticles(dt) {
             if (pt.life <= 0) { data.splice(i, 1); continue; }
 
             pt.vel.x += gravX; pt.vel.y += gravY; pt.vel.z += gravZ;
-            pt.pos.x += pt.vel.x * dt;
-            pt.pos.y += pt.vel.y * dt;
-            pt.pos.z += pt.vel.z * dt;
+
+            // Very subtle air resistance
+            pt.vel.multiplyScalar(0.998);
+
+            // Environment Collision
+            if (p.environmentCollision) {
+                const stepVel = pt.vel.clone().multiplyScalar(dt);
+                const stepLen = stepVel.length();
+                if (stepLen > 0.001) {
+                    pRaycaster.set(pt.pos, stepVel.clone().normalize());
+                    const radius = pt.size * 0.45; // Synced closer to image sprite bounds
+                    pRaycaster.far = stepLen + radius;
+                    const hits = pRaycaster.intersectObjects(state.selectableObjects, true);
+                    if (hits.length > 0) {
+                        const hit = hits[0];
+                        const normal = hit.face.normal.clone();
+                        
+                        const vDotN = pt.vel.dot(normal);
+                        const vNormal = normal.clone().multiplyScalar(vDotN);
+                        const vTangent = pt.vel.clone().sub(vNormal);
+
+                        // Rolling/Sliding: Use lower friction (0.98) to allow sliding down hills
+                        const friction = 0.98; 
+                        const restitution = 0.15; // Lower bounce for better stacking/piling
+
+                        if (vDotN < 0) {
+                            pt.vel.copy(vTangent.multiplyScalar(friction)).sub(vNormal.multiplyScalar(restitution));
+                        }
+
+                        pt.pos.copy(hit.point).add(normal.multiplyScalar(radius + 0.005));
+                    } else {
+                        pt.pos.add(stepVel);
+                    }
+                }
+            } else {
+                pt.pos.x += pt.vel.x * dt;
+                pt.pos.y += pt.vel.y * dt;
+                pt.pos.z += pt.vel.z * dt;
+            }
+
+            // Particle-to-Particle Collision (Piling and Rolling logic)
+            // Cap increased to 2500 to allow for larger ball pits/stacking effects
+            if (p.particleCollision && data.length < 2500) { 
+                for (let j = i - 1; j >= 0; j--) {
+                    const other = data[j];
+                    const dx = pt.pos.x - other.pos.x;
+                    const dy = pt.pos.y - other.pos.y;
+                    const dz = pt.pos.z - other.pos.z;
+                    const distSq = dx*dx + dy*dy + dz*dz;
+                    const minDist = (pt.size + other.size) * 0.45; // Synced with visual radius
+
+                    if (distSq < minDist * minDist) {
+                        const dist = Math.sqrt(distSq) || 0.001;
+                        const nx = dx / dist; const ny = dy / dist; const nz = dz / dist;
+                        const normal = new THREE.Vector3(nx, ny, nz);
+                        const overlap = (minDist - dist) * 0.7; // Firmer push for stacking
+                        
+                        pt.pos.x += nx * overlap; pt.pos.y += ny * overlap; pt.pos.z += nz * overlap;
+                        other.pos.x -= nx * overlap; other.pos.y -= ny * overlap; other.pos.z -= nz * overlap;
+                        
+                        const relVel = pt.vel.clone().sub(other.vel);
+                        const velAlongNormal = relVel.dot(normal);
+                        
+                        if (velAlongNormal < 0) {
+                            const jImpulse = -(1 + 0.2) * velAlongNormal;
+                            const impulse = normal.clone().multiplyScalar(jImpulse * 0.5);
+                            pt.vel.add(impulse);
+                            other.vel.sub(impulse);
+                        }
+                        
+                        // Friction between particles to help them stack
+                        pt.vel.multiplyScalar(0.99);
+                        other.vel.multiplyScalar(0.99);
+                    }
+                }
+            }
 
             positions.push(pt.pos.x, pt.pos.y, pt.pos.z);
             
@@ -542,62 +617,51 @@ export function refreshSceneState(targetItem = null) {
                     currId = pItem.id;
                 }
 
-                const shouldBePositional = isWorld || isSoundsFolder;
                 const currentIsPositional = item.audioRef instanceof THREE.PositionalAudio;
 
-                // 1. Manage Audio Object Lifetime (Re-create only if spatial type changes)
-                if (!item.audioRef || shouldBePositional !== currentIsPositional) {
+                // 1. Manage Audio Object Lifetime
+                if (!item.audioRef || currentIsPositional) {
                     if (item.audioRef) {
                         if (item.audioRef.parent) item.audioRef.parent.remove(item.audioRef);
                     }
-
-                    if (shouldBePositional) {
-                        item.audioRef = new THREE.PositionalAudio(audioListener);
-                        // Linear model allows Max Distance to act as a hard cutoff point.
-                        item.audioRef.setDistanceModel('linear');
-                    } else {
-                        item.audioRef = new THREE.Audio(audioListener);
-                    }
+                    item.audioRef = new THREE.Audio(audioListener);
                     item._sessionPlaying = false;
                 }
 
-                // 2. Parenting and Position
-                const targetParent = shouldBePositional ? (physicalParentObj || scene) : audioListener;
+                // 2. Parenting
+                const targetParent = audioListener;
                 if (item.audioRef.parent !== targetParent) {
                     targetParent.add(item.audioRef);
                 }
 
-                if (shouldBePositional) {
-                    // If attached to a part, center it. Otherwise, use its world coordinates.
-                    if (physicalParentObj) {
-                        item.audioRef.position.set(0, 0, 0);
-                    } else {
-                        item.audioRef.position.set(p.posX || 0, p.posY || 0, p.posZ || 0);
-                    }
-                }
-                
-                // 2. Buffer Assignment (Critical: Only set if changed to prevent restarts)
+                // 3. Buffer Assignment (Critical: Only set if changed to prevent restarts)
                 if (!item.audioRef.buffer || item.audioRef.buffer !== asset.buffer) {
                     item.audioRef.setBuffer(asset.buffer);
                 }
 
-                // 3. Update Properties
-                if (item.audioRef.isPositionalAudio) {
-                    // Start Distance (refDistance): Distance where volume starts to drop.
-                    // Max Distance (maxDistance): Distance where volume becomes exactly 0.
-                    const rd = p.startDistance ?? 10;
-                    const md = Math.max(rd + 1, p.maxDistance ?? 100);
-                    
-                    // For the Linear model to obey Max Distance as a hard cutoff, 
-                    // the Rolloff Factor (rf) must be exactly 1.0.
-                    const rf = 1.0; 
-                    
-                    if (item.audioRef.getRefDistance() !== rd) item.audioRef.setRefDistance(rd);
-                    if (item.audioRef.getRolloffFactor() !== rf) item.audioRef.setRolloffFactor(rf);
-                    if (item.audioRef.getMaxDistance() !== md) item.audioRef.setMaxDistance(md);
+                // 4. Manual Distance Attenuation
+                const listenerPos = new THREE.Vector3();
+                const soundPos = new THREE.Vector3();
+                camera.getWorldPosition(listenerPos);
+                if (physicalParentObj) {
+                    physicalParentObj.getWorldPosition(soundPos);
+                } else {
+                    soundPos.set(p.posX || 0, p.posY || 0, p.posZ || 0);
                 }
-                
-                const targetVol = (p.volume ?? 100) / 100;
+
+                const distance = listenerPos.distanceTo(soundPos);
+                const start = Math.max(0, p.startDistance ?? 0);
+                const rolloff = Math.max(start, p.rolloffDistance ?? start);
+                const max = Math.max(rolloff, p.maxDistance ?? 100);
+
+                let spatialAtten = 1;
+                if (distance >= max) {
+                    spatialAtten = 0;
+                } else if (distance > rolloff) {
+                    spatialAtten = 1 - (distance - rolloff) / Math.max(0.0001, max - rolloff);
+                }
+
+                const targetVol = ((p.volume ?? 100) / 100) * spatialAtten;
                 if (item.audioRef.getVolume() !== targetVol) item.audioRef.setVolume(targetVol);
                 
                 const targetRate = (p.playbackSpeed ?? 1) * (p.pitch ?? 1);
@@ -629,7 +693,7 @@ export function refreshSceneState(targetItem = null) {
         // Handle UI Elements
         if (isUI && surfaceTypes.includes(item.type)) {
             const parentItem = findParentItem(item.id);
-            const isOnObject = parentItem && (parentItem.type === 'object' || parentItem.type === 'spawn');
+            const isOnObject = parentItem && (parentItem.type === 'object' || parentItem.type === 'spawn' || parentItem.type === 'billboard');
             
             // If UI is on an object, don't render it in the 2D overlay
             if (isOnObject) return;
@@ -646,7 +710,7 @@ export function refreshSceneState(targetItem = null) {
                 font-size: ${p.fontSize || 14}px; border: none; border-radius: 0;
                 display: ${displayStyle};
                 opacity: ${p.opacity ?? 1};
-                left: ${p.posX || 0}px; top: ${p.posY || 0}px;
+                left: ${window.innerWidth / 2 + (p.posX || 0) - (p.sizeX || 100) / 2}px; top: ${window.innerHeight / 2 + (p.posY || 0) - (p.sizeY || 50) / 2}px;
                 width: ${p.sizeX || 100}px; height: ${p.sizeY || 50}px;
                 transform: rotate(${p.rotation || 0}deg); transform-origin: center;
                 box-sizing: border-box; overflow: visible; align-items: center; justify-content: center; z-index: ${p.order || 0};
@@ -710,9 +774,11 @@ export function refreshSceneState(targetItem = null) {
                 const rad = (p.rotation || 0) * (Math.PI / 180);
                 const cos = Math.cos(rad), sin = Math.sin(rad);
 
-                // Calculate initial world center and anchor point
-                const startCenterX = startPosX + startSizeX / 2;
-                const startCenterY = startPosY + startSizeY / 2;
+                // Calculate initial world center (screen pixels) and anchor point
+                const screenCenterX = window.innerWidth / 2;
+                const screenCenterY = window.innerHeight / 2;
+                const startCenterX = screenCenterX + startPosX;
+                const startCenterY = screenCenterY + startPosY;
 
                 // Anchor is the point that stays fixed during scaling (the opposite corner)
                 let localAnchorX = 0, localAnchorY = 0;
@@ -752,15 +818,15 @@ export function refreshSceneState(targetItem = null) {
 
                         p.sizeX = Math.round(newSizeX);
                         p.sizeY = Math.round(newSizeY);
-                        p.posX = Math.round(newCenterX - newSizeX / 2);
-                        p.posY = Math.round(newCenterY - newSizeY / 2);
+                        p.posX = Math.round(newCenterX - screenCenterX);
+                        p.posY = Math.round(newCenterY - screenCenterY);
                     } else if (mode === 'rotate') {
                         const rect = el.getBoundingClientRect();
                         const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
                         p.rotation = Math.round(Math.atan2(me.clientY - cy, me.clientX - cx) * (180 / Math.PI) + 90);
                     }
                     
-                    el.style.left = p.posX + 'px'; el.style.top = p.posY + 'px';
+                    el.style.left = (screenCenterX + p.posX - p.sizeX / 2) + 'px'; el.style.top = (screenCenterY + p.posY - p.sizeY / 2) + 'px';
                     el.style.width = p.sizeX + 'px'; el.style.height = p.sizeY + 'px';
                     el.style.transform = `rotate(${p.rotation}deg)`;
                     updatePropertyValues();
@@ -812,20 +878,147 @@ export function refreshSceneState(targetItem = null) {
             const mesh = item.objectRef;
             const isBox = mesh.geometry && mesh.geometry.type === 'BoxGeometry';
 
-            // Performance optimization: Only re-bake Surface UI if the object is selected
-            // or if we are performing a global refresh (targetItem is null)
-            const isSelected = state.selectedObjects.includes(mesh) || state.selectedItems.has(item);
+            // Check if any selected item is a descendant (to refresh parent billboards when children change)
+            const isSelected = state.selectedObjects.includes(mesh) || state.selectedItems.has(item) || 
+                               Array.from(state.selectedItems).some(sel => {
+                                   let p = findParentItem(sel.id);
+                                   return p && p.id === item.id;
+                               });
+
             const shouldUpdateSurface = !targetItem || isSelected || targetItem === item;
 
             // If not a box and not a global refresh, we still update if it's the target.
             if (!shouldUpdateSurface && isBox) return;
             
             const requiredOverlayKeys = new Set();
-            const currentOverlays = mesh.children.filter(c => c.userData.isSurfaceOverlay);
 
+            // Pre-calculate variables used by both Billboards and Surface UI
             const worldScale = new THREE.Vector3();
             mesh.getWorldScale(worldScale);
             const surfaceChildren = getSurfaceDescendants(item);
+
+            // --- 0. HANDLE BILLBOARD UI RENDERING ---
+            if (item.type === 'billboard') {
+                const key = `${mesh.uuid}-billboard`;
+                const uiElements = surfaceChildren.filter(c => c.type !== 'texture');
+                
+                if (uiElements.length > 0) {
+                    mesh.castShadow = item.properties?.castShadow !== false;
+                    mesh.receiveShadow = true;
+
+                    // "No Canvas Limit": Calculate the bounds of all UI children to make the billboard quad elastic
+                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                    uiElements.forEach(c => {
+                        const p = c.properties || {};
+                        if (p.visible === false) return;
+                        const x = p.posX || 0, y = p.posY || 0;
+                        const w = p.sizeX || 100, h = p.sizeY || 50;
+                        minX = Math.min(minX, x); minY = Math.min(minY, y);
+                        maxX = Math.max(maxX, x + w); maxY = Math.max(maxY, y + h);
+                    });
+
+                    if (minX === Infinity) { minX = 0; minY = 0; maxX = 100; maxY = 50; }
+                    const contentW = maxX - minX;
+                    const contentH = maxY - minY;
+
+                    // Dynamic Resolution based on UI Content Bounds
+                    const targetW = Math.max(512, Math.min(2048, Math.ceil(contentW * 1.5)));
+                    const targetH = Math.max(512, Math.min(2048, Math.ceil(contentH * 1.5)));
+
+                    let canvas = surfaceCanvases.get(key);
+                    if (!canvas || canvas.width !== targetW || canvas.height !== targetH) {
+                        if (surfaceTextures.has(key)) {
+                            surfaceTextures.get(key).dispose();
+                            surfaceTextures.delete(key);
+                        }
+                        canvas = document.createElement('canvas');
+                        canvas.width = targetW; canvas.height = targetH;
+                        surfaceCanvases.set(key, canvas);
+                    }
+                    
+                    const ctx = canvas.getContext('2d');
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    
+                    uiElements.sort((a, b) => (a.properties?.order || 0) - (b.properties?.order || 0));
+                    const ux = canvas.width / 1000;
+                    const uy = canvas.height / 1000;
+
+                    uiElements.forEach(c => {
+                        const p = c.properties || {};
+                        if (p.visible === false) return;
+                        ctx.save();
+                        ctx.globalAlpha = p.opacity ?? 1;
+                        ctx.translate((500 + (p.posX || 0)) * ux, (500 + (p.posY || 0)) * uy);
+                        ctx.rotate((p.rotation || 0) * Math.PI / 180);
+                        ctx.translate((-(p.sizeX || 100) / 2) * ux, (-(p.sizeY || 50) / 2) * uy);
+                        
+                        if (c.type === 'frame' || c.type === 'textlabel') {
+                            ctx.fillStyle = p.color || '#ffffff';
+                            ctx.fillRect(0, 0, (p.sizeX || 100) * ux, (p.sizeY || 50) * uy);
+                        }
+                        if (c.type === 'image' && p.imageId && state.imageAssets[p.imageId]) {
+                            const asset = state.imageAssets[p.imageId];
+                            const img = new Image(); img.src = asset.frames[asset.currentFrame || 0];
+                            if (img.complete) ctx.drawImage(img, 0, 0, (p.sizeX || 100) * ux, (p.sizeY || 50) * uy);
+                            else img.onload = () => { if (img.complete) refreshSceneState(); };
+                        }
+                        if ((c.type === 'textlabel' || c.type === 'text') && p.text) {
+                            ctx.fillStyle = p.textColor || '#000000';
+                            ctx.font = `${(p.fontSize || 24) * uy}px sans-serif`;
+                            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                            ctx.fillText(p.text, ((p.sizeX || 100) / 2) * ux, ((p.sizeY || 50) / 2) * uy);
+                        }
+                        ctx.restore();
+                    });
+
+                    if (!surfaceTextures.has(key)) {
+                        const tex = new THREE.CanvasTexture(canvas);
+                        tex.colorSpace = THREE.SRGBColorSpace;
+                        surfaceTextures.set(key, tex);
+                    }
+                    const uiTex = surfaceTextures.get(key);
+                    uiTex.needsUpdate = true;
+
+                    if (mesh.material.map !== uiTex) {
+                        mesh.material.map = uiTex;
+                        mesh.material.needsUpdate = true;
+                    }
+                    mesh.material.opacity = item.properties?.opacity ?? 1;
+                    mesh.material.alphaTest = 0.05;
+
+                    // Purely Visual Rotation: Face camera ONLY during render, preserving logical rotation for gizmos
+                    const originalQuat = new THREE.Quaternion();
+                    const tempQuat = new THREE.Quaternion();
+                    mesh.onBeforeRender = (renderer, scene, camera) => {
+                        originalQuat.copy(mesh.quaternion);
+                        mesh.quaternion.copy(camera.quaternion);
+                        if (mesh.parent && mesh.parent !== scene) {
+                            mesh.parent.getWorldQuaternion(tempQuat).invert();
+                            mesh.quaternion.premultiply(tempQuat);
+                        }
+                        mesh.updateMatrixWorld();
+                    };
+                    mesh.onAfterRender = () => {
+                        mesh.quaternion.copy(originalQuat);
+                        mesh.updateMatrixWorld();
+                    };
+
+                    mesh.material.visible = true;
+                } else {
+                    // Fallback for empty billboard
+                    if (mesh.material.map) {
+                        mesh.material.map = null;
+                        mesh.material.needsUpdate = true;
+                    }
+                    mesh.material.transparent = true;
+                    mesh.material.opacity = 0;
+                    mesh.material.visible = true; // Stay visible (but 0 opacity) for selection hits
+                }
+                return; // Billboards don't use the standard face-overlay system below
+            }
+
+            // --- 1. HANDLE MESH SURFACE OVERLAYS ---
+            const currentOverlays = mesh.children.filter(c => c.userData.isSurfaceOverlay);
             
             // FIX: Always run bounds check to allow cleanup if surfaceChildren is 0
             if (mesh.isMesh) {
@@ -957,7 +1150,7 @@ export function refreshSceneState(targetItem = null) {
                                 const uy = canvas.height / 1000;
                                 ctx.save();
                                 ctx.globalAlpha = p.opacity ?? 1;
-                                ctx.translate(((p.posX || 0) + (p.sizeX || 100) / 2) * ux, ((p.posY || 0) + (p.sizeY || 50) / 2) * uy);
+                                ctx.translate((500 + (p.posX || 0)) * ux, (500 + (p.posY || 0)) * uy);
                                 ctx.rotate((p.rotation || 0) * Math.PI / 180);
                                 ctx.translate((-(p.sizeX || 100) / 2) * ux, (-(p.sizeY || 50) / 2) * uy);
                                 if (c.type === 'frame' || c.type === 'textlabel') {
@@ -1140,6 +1333,57 @@ export function refreshSceneState(targetItem = null) {
     }
 }
 
+export function updateSoundAttenuation() {
+    if (!state.isPlayTesting) return;
+    const listenerPos = new THREE.Vector3();
+    const soundPos = new THREE.Vector3();
+    camera.getWorldPosition(listenerPos);
+
+    const processItem = (item) => {
+        if (item.type === 'sound' && item.audioRef && item.audioRef.buffer) {
+            const p = item.properties || {};
+            let physicalParentObj = null;
+            let currId = item.id;
+            while (currId) {
+                const pItem = findParentItem(currId);
+                if (!pItem) break;
+                if (pItem.objectRef && (pItem.type === 'object' || pItem.type === 'spawn')) {
+                    physicalParentObj = pItem.objectRef;
+                    break;
+                }
+                currId = pItem.id;
+            }
+
+            if (physicalParentObj) {
+                physicalParentObj.getWorldPosition(soundPos);
+            } else {
+                soundPos.set(p.posX || 0, p.posY || 0, p.posZ || 0);
+            }
+
+            const distance = listenerPos.distanceTo(soundPos);
+            const start = Math.max(0, p.startDistance ?? 0);
+            const rolloff = Math.max(start, p.rolloffDistance ?? start);
+            const max = Math.max(rolloff, p.maxDistance ?? 100);
+
+            let spatialAtten = 1;
+            if (distance >= max) {
+                spatialAtten = 0;
+            } else if (distance > rolloff) {
+                spatialAtten = 1 - (distance - rolloff) / Math.max(0.0001, max - rolloff);
+            }
+
+            const targetVol = ((p.volume ?? 100) / 100) * spatialAtten;
+            if (item.audioRef.getVolume() !== targetVol) {
+                item.audioRef.setVolume(targetVol);
+            }
+        }
+
+        if (item.children) item.children.forEach(processItem);
+    };
+
+    explorerHierarchy.items.forEach(processItem);
+}
+
 // --- UI AND INSPECTOR ---
 const explorerList = document.getElementById('explorer-list');
 const propertyControls = document.getElementById('property-controls');
@@ -1278,6 +1522,8 @@ export const explorerHierarchy = {
             'texture': 'Texture',
             'sky': 'Sky',
             'image': 'Image',
+            'billboard': 'Billboard',
+            'camera': 'Camera',
             'spawn': 'Player Spawn'
         };
         const key = type.toLowerCase();
@@ -1464,6 +1710,8 @@ function renderExplorerItem(item, depth = 0) {
             'spawn': '🚩',
             'textlabel': '📄',
             'sound': '🔊',
+            'billboard': '📺',
+            'camera': '📷',
             'text': '🔤',
             'image': '🖼️',
             'texture': '🏁',
@@ -1522,6 +1770,8 @@ function renderExplorerItem(item, depth = 0) {
             { type: 'create', label: '🎁 Model', objectType: 'Model' },
             { type: 'create', label: '💡 Light', objectType: 'Light' },
             { type: 'create', label: '🔊 Sound', objectType: 'Sound' },
+            { type: 'create', label: '📺 Billboard', objectType: 'Billboard' },
+            { type: 'create', label: '📷 Camera', objectType: 'Camera' },
             { type: 'create', label: '🚩 Player Spawn', objectType: 'PlayerSpawn' },
             { type: 'create', label: '🏁 Texture', objectType: 'Texture' },
             { type: 'create', label: '💫 Particles', objectType: 'ParticleEmitter' },
@@ -1826,26 +2076,28 @@ const objectIdCache = new Map();
 
 export function findItemIdForObject(obj) {
     if (!obj) return null;
-    if (objectIdCache.has(obj)) return objectIdCache.get(obj);
-    
-    const search = (items) => {
-        for (let item of items) {
-            if (item.objectRef === obj) {
-                objectIdCache.set(obj, item.id);
-                return item.id;
+    let curr = obj;
+    while (curr) {
+        if (objectIdCache.has(curr)) return objectIdCache.get(curr);
+        
+        const search = (items) => {
+            for (let item of items) {
+                if (item.objectRef === curr || item.audioRef === curr) {
+                    objectIdCache.set(curr, item.id);
+                    return item.id;
+                }
+                if (item.children) {
+                    const found = search(item.children);
+                    if (found) return found;
+                }
             }
-            if (item.audioRef === obj) {
-                objectIdCache.set(obj, item.id);
-                return item.id;
-            }
-            if (item.children) {
-                const found = search(item.children);
-                if (found) return found;
-            }
-        }
-        return null;
-    };
-    return search(explorerHierarchy.items);
+            return null;
+        };
+        const id = search(explorerHierarchy.items);
+        if (id) return id;
+        curr = curr.parent;
+    }
+    return null;
 }
 
 export function updateExplorer() {
@@ -2593,10 +2845,11 @@ function createPropertyControl(label, value, type, onChange) {
     if (type === 'boolean') {
         labelEl.style.marginBottom = '0';
     }
-    labelEl.innerText = label.replace(/([A-Z])/g, ' $1')
+    const displayLabel = label.replace(/([A-Z])/g, ' $1')
                                .replace(/^./, str => str.toUpperCase());
+    labelEl.innerText = displayLabel;
     
-    const propId = labelEl.innerText.toLowerCase().replace(/\s+/g, '-');
+    const propId = label;
 
     container.appendChild(labelEl);
 
@@ -3044,9 +3297,9 @@ function renderSoundEditor(assetId) {
     controls.appendChild(createValueBox('Pitch', 'pitch', 0, 10, 0.1));
     controls.appendChild(createValueBox('Speed', 'playbackSpeed', 0, 10, 0.1));
     
-    controls.appendChild(createValueBox('Start Distance', 'startDistance', 0, 100, 0.1));
+    controls.appendChild(createValueBox('Start Distance', 'startDistance', 0, 1000, 0.1));
     controls.appendChild(createValueBox('Max Distance', 'maxDistance', 0, 1000, 1));
-    controls.appendChild(createValueBox('Roll Off Distance', 'rolloffDistance', 0, 10, 0.1));
+    controls.appendChild(createValueBox('Roll Off Distance', 'rolloffDistance', 0, 1000, 0.1));
     
     const playBtn = document.createElement('button');
     playBtn.innerHTML = '▶';
@@ -3168,6 +3421,7 @@ export function showInspector() {
     }
 
     const isPhysical = currentItem?.type === 'object' || state.selectedObjects.some(obj => obj.isMesh);
+    const isBillboard = currentItem?.type === 'billboard' || state.selectedObjects.some(obj => obj.userData.isBillboard);
     const uiTypes = ['textlabel', 'textbutton', 'frame', 'text', 'framebutton', 'image'];
     const isUI = currentItem && uiTypes.includes(currentItem.type);
     const isLight = currentItem?.type === 'light' || state.selectedObjects.some(obj => obj.isLight);
@@ -3178,7 +3432,7 @@ export function showInspector() {
     const isInsideObject = (itemId) => {
         let p = findParentItem(itemId);
         while (p) {
-            if (p.type === 'object' || p.type === 'spawn') return true;
+            if (p.type === 'object' || p.type === 'spawn' || p.type === 'billboard') return true;
             p = findParentItem(p.id);
         }
         return false;
@@ -3264,16 +3518,16 @@ export function showInspector() {
                 refreshSceneState();
             }));
 
-            ['rate', 'spread', 'opacity', 'color', 'enabled'].forEach(key => {
-                const type = key === 'color' ? 'color' : (key === 'enabled' ? 'boolean' : 'number');
-                const label = key.charAt(0).toUpperCase() + key.slice(1);
+            ['rate', 'spread', 'opacity', 'color', 'enabled', 'environmentCollision', 'particleCollision'].forEach(key => {
+                const type = (key === 'enabled' || key === 'environmentCollision' || key === 'particleCollision') ? 'boolean' : (key === 'color' ? 'color' : 'number');
+                const label = key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1');
                 dynamicProps.appendChild(createPropertyControl(label, props[key], type, (newVal) => {
                     props[key] = type === 'number' ? parseFloat(newVal) : newVal;
                     refreshSceneState();
                 }));
             });
             
-            handled.add('reflectiveness'); // Add to handled set
+            handled.add('reflectiveness'); 
             handled.add('imageId'); handled.add('shape'); handled.add('blending');
             handled.add('lifeMin'); handled.add('lifeMax');
             handled.add('speedMin'); handled.add('speedMax'); handled.add('sizeMin'); handled.add('sizeMax');
@@ -3281,6 +3535,7 @@ export function showInspector() {
             handled.add('directionX'); handled.add('directionY'); handled.add('directionZ');
             handled.add('rate'); handled.add('spread'); handled.add('opacity');
             handled.add('color'); handled.add('enabled');
+            handled.add('environmentCollision'); handled.add('particleCollision');
         } else if (isLight) {
             pKeys.forEach(key => {
                 // Hide internal sound identifiers
@@ -3578,7 +3833,37 @@ function createObjectInFolder(parentId, type) {
         const item = { id: `obj-${Date.now()}-${Math.floor(Math.random() * 1000)}`, type: 'object', name: objName, objectRef: mesh, children: [], properties: {} };
         parent.children.push(item);
         explorerHierarchy.expanded[parentId] = true;
+
         attachTool(mesh, false);
+        refreshSceneState();
+        updateExplorer();
+
+    } else if (type === 'Billboard') {
+        const name = explorerHierarchy.getNextName('billboard');
+        const geo = new THREE.PlaneGeometry(1, 1);
+        // Billboards are typically unlit to ensure UI colors are accurate
+        const mat = new THREE.MeshBasicMaterial({ 
+            transparent: true, side: THREE.DoubleSide, depthWrite: false, opacity: 1, alphaTest: 0.05 
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.scale.set(5, 5, 1);
+        mesh.userData.isBillboard = true;
+        mesh.userData.anchored = true;
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        mesh.userData.opacity = 1;
+        mesh.userData.isEditor = false;
+        
+        scene.add(mesh);
+        state.selectableObjects.push(mesh);
+        placeOnTargetSurface(mesh);
+        
+        const item = { id: `bill-${Date.now()}`, type: 'billboard', name: name, objectRef: mesh, children: [], properties: { opacity: 1 } };
+        parent.children.push(item);
+        explorerHierarchy.expanded[parentId] = true;
+        attachTool(mesh, false);
+        refreshSceneState();
+        updateExplorer();
 
     } else if (type === 'PlayerSpawn') {
         const geometry = new THREE.BoxGeometry(1, 1, 1);
@@ -3659,6 +3944,8 @@ function createObjectInFolder(parentId, type) {
                 directionX: 0, directionY: 1, directionZ: 0,
                 spread: 0.4, blending: 'Normal',
                 enabled: true,
+                environmentCollision: false,
+                particleCollision: false,
                 reflectiveness: 0.5
             } 
         };
@@ -3673,31 +3960,19 @@ function createObjectInFolder(parentId, type) {
         parent.children.push(item);
     } else if (type === 'TextLabel') {
         const name = explorerHierarchy.getNextName('textlabel');
-        const isOnObject = parent.type === 'object' || parent.type === 'spawn';
-        const posX = isOnObject ? 450 : Math.floor(window.innerWidth / 2 - 50);
-        const posY = isOnObject ? 475 : Math.floor(window.innerHeight / 2 - 25);
-        const item = { id: `ui-${Date.now()}`, type: 'textlabel', name: name, properties: { text: 'Label', fontSize: 18, color: '#ffffff', textColor: '#000000', posX: posX, posY: posY, sizeX: 100, sizeY: 50, rotation: 0, order: getUniqueUIOrder(), visible: true, face: 'Front', opacity: 1 } };
+        const item = { id: `ui-${Date.now()}`, type: 'textlabel', name: name, properties: { text: 'Label', fontSize: 18, color: '#ffffff', textColor: '#000000', posX: 0, posY: 0, sizeX: 100, sizeY: 50, rotation: 0, order: getUniqueUIOrder(), visible: true, face: 'Front', opacity: 1 } };
         parent.children.push(item);
     } else if (type === 'Frame') {
         const name = explorerHierarchy.getNextName('frame');
-        const isOnObject = parent.type === 'object' || parent.type === 'spawn';
-        const posX = isOnObject ? 450 : Math.floor(window.innerWidth / 2 - 50);
-        const posY = isOnObject ? 450 : Math.floor(window.innerHeight / 2 - 50);
-        const item = { id: `ui-${Date.now()}`, type: 'frame', name: name, properties: { color: '#ffffff', posX: posX, posY: posY, sizeX: 100, sizeY: 100, rotation: 0, order: getUniqueUIOrder(), visible: true, face: 'Front', opacity: 1 } };
+        const item = { id: `ui-${Date.now()}`, type: 'frame', name: name, properties: { color: '#ffffff', posX: 0, posY: 0, sizeX: 100, sizeY: 100, rotation: 0, order: getUniqueUIOrder(), visible: true, face: 'Front', opacity: 1 } };
         parent.children.push(item);
     } else if (type === 'Text') {
         const name = explorerHierarchy.getNextName('text');
-        const isOnObject = parent.type === 'object' || parent.type === 'spawn';
-        const posX = isOnObject ? 450 : Math.floor(window.innerWidth / 2 - 50);
-        const posY = isOnObject ? 475 : Math.floor(window.innerHeight / 2 - 25);
-        const item = { id: `ui-${Date.now()}`, type: 'text', name: name, properties: { text: 'Text', fontSize: 18, textColor: '#ffffff', posX: posX, posY: posY, sizeX: 100, sizeY: 50, rotation: 0, order: getUniqueUIOrder(), visible: true, face: 'Front', opacity: 1 } };
+        const item = { id: `ui-${Date.now()}`, type: 'text', name: name, properties: { text: 'Text', fontSize: 18, textColor: '#ffffff', posX: 0, posY: 0, sizeX: 100, sizeY: 50, rotation: 0, order: getUniqueUIOrder(), visible: true, face: 'Front', opacity: 1 } };
         parent.children.push(item);
     } else if (type === 'Image') {
         const name = explorerHierarchy.getNextName('image');
-        const isOnObject = parent.type === 'object' || parent.type === 'spawn';
-        const posX = isOnObject ? 450 : Math.floor(window.innerWidth / 2 - 50);
-        const posY = isOnObject ? 450 : Math.floor(window.innerHeight / 2 - 50);
-        const item = { id: `ui-${Date.now()}`, type: 'image', name: name, properties: { imageId: null, posX: posX, posY: posY, sizeX: 100, sizeY: 100, rotation: 0, order: getUniqueUIOrder(), visible: true, face: 'Front', opacity: 1 } };
+        const item = { id: `ui-${Date.now()}`, type: 'image', name: name, properties: { imageId: null, posX: 0, posY: 0, sizeX: 100, sizeY: 100, rotation: 0, order: getUniqueUIOrder(), visible: true, face: 'Front', opacity: 1 } };
         parent.children.push(item);
     } else if (type === 'Texture') {
         const name = explorerHierarchy.getNextName('texture');
@@ -3706,6 +3981,33 @@ function createObjectInFolder(parentId, type) {
     } else if (type === 'Sky') {
         const name = explorerHierarchy.getNextName('sky');
         const item = { id: `sky-${Date.now()}`, type: 'sky', name: name, properties: { skyboxId: null } };
+        parent.children.push(item);
+    } else if (type === 'Camera') {
+        const name = explorerHierarchy.getNextName('camera');
+        const cam = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        
+        const indicator = new THREE.Group();
+        indicator.userData.isIndicator = true;
+        indicator.userData.isEditor = true;
+        const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.8), new THREE.MeshStandardMaterial({ color: 0x222222 }));
+        const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.3, 0.4, 16), new THREE.MeshStandardMaterial({ color: 0x444444 }));
+        lens.rotation.x = Math.PI / 2;
+        lens.position.z = -0.5;
+        indicator.add(body, lens);
+        
+        cam.add(indicator);
+        scene.add(cam);
+        state.selectableObjects.push(cam);
+        placeOnTargetSurface(cam);
+        
+        const item = { 
+            id: `cam-${Date.now()}`, 
+            type: 'camera', 
+            name: name, 
+            objectRef: cam, 
+            properties: { enabled: false, fov: 75, near: 0.1, far: 1000 },
+            children: [] 
+        };
         parent.children.push(item);
     } else if (type === 'Sound') {
         const name = explorerHierarchy.getNextName('sound');
