@@ -15,30 +15,20 @@ import { renderSSRPrepass, godRaysPass } from './setup.js';
 function updateSunShadowCameraToCameraView() {
     if (!sun || !sun.target || !moon || !moon.target) return;
     
-    // Get the point in front of the camera where we want the shadow box to be centered
     const center = camera.position.clone().add(camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(30));
-    
-    // Snap the center to the nearest unit to prevent shadow shimmering/jittering as the camera moves
     center.set(Math.floor(center.x), Math.floor(center.y), Math.floor(center.z));
 
-    // Update sun and target positions to maintain light direction while shifting the shadow volume
     sun.position.copy(center).add(state.sunLightOffset);
     sun.target.position.copy(center);
     sun.target.updateMatrixWorld();
 
-    // Update moon and target (Moon is always opposite the sun)
     moon.position.copy(center).sub(state.sunLightOffset);
     moon.target.position.copy(center);
 
-    // Position the Sun Disk very far away in the direction of the light
     const sunDir = state.sunLightOffset.clone().normalize();
     sunDisk.position.copy(camera.position).add(sunDir.multiplyScalar(500));
 }
 
-/**
- * Prioritizes lights based on distance to the camera to support "infinite" light counts.
- * Enforces a hard cap of 32 active lights with smooth budget-based fading.
- */
 function manageLightPriority() {
     const lightCount = state.allLights.length;
     if (lightCount === 0) return;
@@ -46,7 +36,6 @@ function manageLightPriority() {
     const cameraPos = camera.position;
     const worldPos = new THREE.Vector3();
 
-    // 1. Throttle for expensive distance calculations and sorting (less frequent)
     state._lightDistanceUpdateCounter = (state._lightDistanceUpdateCounter || 0) + 1;
     const shouldRecalculateDistances = (state._lightDistanceUpdateCounter % 60 === 0) || state.isDraggingObject;
 
@@ -61,7 +50,6 @@ function manageLightPriority() {
         state.allLights.sort((a, b) => a._distSq - b._distSq);
     }
 
-    // 2. Throttle for applying light properties (more frequent, uses last known distances)
     state._lightPropertyUpdateCounter = (state._lightPropertyUpdateCounter || 0) + 1;
     const shouldUpdateLightProperties = (state._lightPropertyUpdateCounter % 10 === 0) || shouldRecalculateDistances;
 
@@ -82,25 +70,20 @@ function manageLightPriority() {
         const dist = item._dist;
         const baseIntensity = (lp.intensity ?? 1) * 40;
 
-        // --- TIER 1 & 2: DYNAMIC LIGHTING (NEAR-MID RANGE) ---
         const isCandidate = dynamicLightPool < dynamicLimit && dist < diffuseThreshold;
         
         if (isCandidate) {
             light.visible = true;
             dynamicLightPool++;
 
-            // 1. Double-Layer Smooth Fading
-            // A: Distance Fading (Fades as you walk away)
             const distFadeStart = 150;
             const distFade = 1.0 - Math.max(0, Math.min(1.0, (dist - distFadeStart) / (diffuseThreshold - distFadeStart)));
             
-            // B: Budget Fading (Fades the 24th through 32nd light so the 33rd doesn't "pop" off)
             const budgetFadeStart = 24;
             const budgetFade = 1.0 - Math.max(0, Math.min(1.0, (dynamicLightPool - budgetFadeStart) / (dynamicLimit - budgetFadeStart)));
 
             light.intensity = baseIntensity * Math.pow(distFade * budgetFade, 2);
 
-            // 2. Continuous Shadow Management (Fixes Jitter)
             const shouldCastShadow = dynamicLightPool <= shadowLimit && lp.castShadow !== false && dist < (state.lightShadowRange || 120);
             
             if (light.castShadow !== shouldCastShadow) {
@@ -117,7 +100,6 @@ function manageLightPriority() {
             if (light.castShadow) light.castShadow = false;
         }
 
-        // --- TIER 3: BILLBOARD LOD (THE DISTANT GLOW) ---
         if (item.billboardRef) {
             const isWithinBillboardRange = dist < visualThreshold;
             
@@ -128,13 +110,10 @@ function manageLightPriority() {
                     const billboardScale = Math.max(0.5, dist * 0.015);
                     item.billboardRef.scale.set(billboardScale, billboardScale, 1);
 
-                    // Seamless Cross-fade:
-                    // Billboard fades IN as the dynamic light fades OUT (between 100 and 250 units)
                     const bFadeInStart = 100;
                     const bFadeInEnd = 250;
                     const fadeIn = Math.max(0, Math.min(1.0, (dist - bFadeInStart) / (bFadeInEnd - bFadeInStart)));
 
-                    // Billboard fades OUT at the edge of the world
                     const bFadeOutStart = visualThreshold * 0.8;
                     const bFadeOutEnd = visualThreshold;
                     const fadeOut = 1.0 - Math.max(0, Math.min(1.0, (dist - bFadeOutStart) / (bFadeOutEnd - bFadeOutStart)));
@@ -146,13 +125,10 @@ function manageLightPriority() {
     }
 }
 
-
-// --- MOUSE & SHORTCUTS ---
 let rightClickStartTime = 0;
 let rightClickStartPos = { x: 0, y: 0 };
 let isRightClickDragging = false;
 
-// Helper function to check if a click is on the UI (menu, sidebar, etc)
 function isClickOnUI(e) {
     const rightClickMenu = document.getElementById('right-click-menu');
     const explorerMenu = document.getElementById('explorer-menu');
@@ -168,17 +144,14 @@ function isClickOnUI(e) {
 }
 
 window.addEventListener('mousedown', (e) => {
-    // Ensure audio context is active on first user interaction
     if (audioListener.context.state === 'suspended') audioListener.context.resume();
 
-    // Ignore left-clicks on UI elements
     if (e.button === 0 && isClickOnUI(e)) {
         return;
     }
     
     if (e.button === 0) {
         if (state.currentMode === 'scale' && scaleHandles.visible) {
-            // Use uiCamera if selecting UI handles
             const rayCamera = state.selectedObjects.some(o => o.userData.isUI) ? uiCamera : camera;
             raycaster.setFromCamera(mouse, rayCamera);
             const handleHits = raycaster.intersectObjects(scaleHandles.children);
@@ -194,7 +167,6 @@ window.addEventListener('mousedown', (e) => {
 
         if (transformControls.dragging || (transformControls.axis !== null)) return;
 
-        // First check UI selection
         raycaster.setFromCamera(mouse, uiCamera);
         const uiIntersects = raycaster.intersectObjects(state.uiObjects);
         if (uiIntersects.length > 0) {
@@ -205,12 +177,10 @@ window.addEventListener('mousedown', (e) => {
             return;
         }
 
-        // Fallback to World selection
         raycaster.setFromCamera(mouse, camera);
         const intersects = raycaster.intersectObjects(state.selectableObjects, true);
         if (intersects.length > 0) {
             let hit = intersects[0].object;
-            // Support selecting the parent object when clicking a surface texture/UI
             if (hit.userData.isSurfaceOverlay && hit.parent) hit = hit.parent;
             const itemId = findItemIdForObject(hit);
             const item = explorerHierarchy.findItemById(itemId);
@@ -220,7 +190,6 @@ window.addEventListener('mousedown', (e) => {
             const now = Date.now();
             const isSelected = state.currentSelectedItem === finalItem;
 
-            // Sound tab logic
             if (finalItem && finalItem.type === 'sound' && isSelected && !e.shiftKey) {
                 if (now - state.lastClickTime < 2000) {
                     const assetId = finalItem.properties?.soundId;
@@ -228,7 +197,6 @@ window.addEventListener('mousedown', (e) => {
                 }
             }
 
-            // If an image or texture object is already selected, clicking it again within 2 seconds opens the tab
             const isAssetType = (i) => i.type === 'image' || i.type === 'texture' || (i.type === 'effect' && i.subType === 'particle');
             if (finalItem && isAssetType(finalItem) && isSelected && !e.shiftKey) {
                 if (now - state.lastClickTime < 2000) {
@@ -251,7 +219,6 @@ window.addEventListener('mousedown', (e) => {
         }
     }
     if (e.button === 2) {
-        // Just track the start of the right-click to distinguish between a click and a camera drag
         e.preventDefault();
         rightClickStartTime = Date.now();
         rightClickStartPos = { x: e.clientX, y: e.clientY };
@@ -286,7 +253,6 @@ window.addEventListener('dblclick', (e) => {
 });
 
 window.addEventListener('mouseup', (e) => {
-    // Don't process canvas logic if clicking on UI
     if (isClickOnUI(e)) {
         return;
     }
@@ -299,7 +265,6 @@ window.addEventListener('mouseup', (e) => {
     if (e.button === 2) {
         const duration = Date.now() - rightClickStartTime;
 
-        // Detect a "Click" (not a camera drag)
         if (!isRightClickDragging && duration < 300) {
             raycaster.setFromCamera(mouse, camera);
             const intersects = raycaster.intersectObjects(state.selectableObjects, true);
@@ -307,20 +272,14 @@ window.addEventListener('mouseup', (e) => {
             if (hitObject && hitObject.userData.isSurfaceOverlay && hitObject.parent) hitObject = hitObject.parent;
             if (hitObject === baseplate) hitObject = null;
 
-            // Logical selection update for right-click:
             if (hitObject) {
-                // If we right-clicked an object NOT in the current selection, we select ONLY that object.
-                // If it IS already in the selection (even part of a multi-selection), we do nothing
-                // to preserve the existing selection while opening the context menu.
                 if (!state.selectedObjects.includes(hitObject)) {
                     const itemId = findItemIdForObject(hitObject);
                     const item = explorerHierarchy.findItemById(itemId);
                     const modelParent = findModelParent(itemId);
                     selectHierarchyItem(modelParent || item, false);
                 }
-            } 
-            // If we right-clicked the background and have no selection, do nothing.
-            // If we have a selection, the menu will show actions for that selection.
+            }
 
             const contextId = hitObject ? findItemIdForObject(hitObject) : null;
             
@@ -339,7 +298,6 @@ window.addEventListener('mousemove', (e) => {
     if (e.buttons === 2) {
         const dist = Math.hypot(e.clientX - rightClickStartPos.x, e.clientY - rightClickStartPos.y);
         
-        // If the mouse moved more than 5px, assume camera rotation and lock pointer
         if (dist > 5 && !isRightClickDragging) {
             isRightClickDragging = true;
             renderer.domElement.requestPointerLock();
@@ -358,7 +316,7 @@ window.addEventListener('mousemove', (e) => {
         const planeNormal = new THREE.Vector3();
         camera.getWorldDirection(planeNormal);
         const dragPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(planeNormal, state.initialDragPoint);
-        const ray = new THREE.Raycaster(); // Use a new raycaster for this specific interaction
+        const ray = new THREE.Raycaster();
         const rayCamera = state.selectedObjects.some(obj => obj.userData.isUI) ? uiCamera : camera;
         ray.setFromCamera(mouse, camera);
         const intersectPoint = new THREE.Vector3();
@@ -380,12 +338,10 @@ window.addEventListener('mousemove', (e) => {
             const moveVec = direction.clone().multiplyScalar(actualChangeInSize / 2);
             selectionGroup.position.copy(state.initialPosition).add(moveVec);
             
-            // Trigger shadow updates for lights inside the selection while moving
             state.selectedObjects.forEach(obj => { if (obj.shadow) obj.shadow.needsUpdate = true; });
 
             updateScaleHandles(); 
             updatePropertyValues();
-            // Recalculate UVs in real-time to prevent texture stretching during scaling
             state.selectedObjects.forEach(obj => { if (obj.isMesh) updateObjectUVs(obj); });
         }
         return;
@@ -402,7 +358,6 @@ window.addEventListener('mousemove', (e) => {
             selectionGroup.position.copy(newPos);
             if (state.selectedObjects.length === 1) updatePropertyValues();
 
-            // Trigger shadow updates for lights/meshes during drag
             state.selectedObjects.forEach(obj => { if (obj.shadow) obj.shadow.needsUpdate = true; });
         }
     }
@@ -426,13 +381,10 @@ function focusSelection() {
     state.pitch = Math.asin(dir.y);
 }
 
-// --- KEYBOARD HANDLING ---
 window.addEventListener('keydown', e => {
     const isCtrl = e.ctrlKey || e.metaKey;
-    
 
     if (!e.ctrlKey && !e.metaKey) keys[e.code] = true;
-    // Allow Ctrl/Cmd shortcuts even when an input is focused to improve UX
     if (document.activeElement.tagName === 'INPUT' && e.code !== 'Escape' && !e.ctrlKey && !e.metaKey) return;
 
     if (e.code === 'Digit1') setMode('select');
@@ -478,7 +430,6 @@ window.addEventListener('keyup', e => {
 });
 
 window.addEventListener('wheel', (e) => {
-    // Don't move camera if scrolling over GUI elements
     if (isClickOnUI(e)) {
         return;
     }
@@ -493,7 +444,6 @@ window.addEventListener('wheel', (e) => {
     }
 }, { passive: true });
 
-// --- PLAYTESTING SETUP ---
 const jumpStrength = 0.3;
 const moveSpeed = 0.1;
 let physicsWorld;
@@ -512,8 +462,6 @@ function initPhysics() {
         restitution: 0.0
     }));
 
-    // Taller Box shape: Width 1.2, Height 3.6, Depth 0.6
-    // Cannon uses half-extents: [0.6, 1.8, 0.3]
     const playerShape = new CANNON.Box(new CANNON.Vec3(0.6, 1.8, 0.3)); 
     
     state.playerPhysicsBody = new CANNON.Body({
@@ -521,21 +469,18 @@ function initPhysics() {
         shape: playerShape,
         fixedRotation: true, 
         material: playerMaterial,
-        linearDamping: 0.1 // Lower damping allows for natural gravitational acceleration
+        linearDamping: 0.1
     });
     
     const localUp = new THREE.Vector3().copy(state.gravityDirection).multiplyScalar(-1).normalize();
     state.playerPhysicsBody.position.copy(state.playerGroup.position);
-    // Orient the physics box to match gravity direction
     state.playerPhysicsBody.quaternion.setFromVectors(new CANNON.Vec3(0, 1, 0), new CANNON.Vec3(localUp.x, localUp.y, localUp.z));
     physicsWorld.addBody(state.playerPhysicsBody);
 
-    // Setup other objects (Keep your existing object loop here...)
     const allObjects = [...state.selectableObjects, baseplate];
     allObjects.forEach(obj => {
         if (!obj || !obj.geometry) return;
         
-        // Skip creating physics body if canCollide is false
         if (obj.userData.canCollide === false) return;
         
         const isAnchored = obj === baseplate || obj.userData.anchored;
@@ -545,7 +490,7 @@ function initPhysics() {
         const worldScale = new THREE.Vector3();
         obj.matrixWorld.decompose(worldPos, worldQuat, worldScale);
 
-let shape;
+        let shape;
         const type = obj.geometry.type;
 
         if (type === 'BoxGeometry') {
@@ -558,11 +503,9 @@ let shape;
         } else if (type === 'SphereGeometry') {
             shape = new CANNON.Sphere(obj.geometry.parameters.radius * worldScale.x);
         } else if (obj.geometry.isBufferGeometry) {
-            // --- CUSTOM MESH COLLISIONS (The Banana Fix!) ---
             const positions = obj.geometry.attributes.position.array;
             const vertices = [];
             
-            // Cannon doesn't auto-scale shapes, so we multiply the vertices by your worldScale
             for (let i = 0; i < positions.length; i += 3) {
                 vertices.push(
                     positions[i] * worldScale.x,
@@ -576,13 +519,11 @@ let shape;
                 const indexArray = obj.geometry.index.array;
                 for (let i = 0; i < indexArray.length; i++) indices.push(indexArray[i]);
             } else {
-                // If the model doesn't have an index array, generate a basic one
                 for (let i = 0; i < positions.length / 3; i++) indices.push(i);
             }
             
             shape = new CANNON.Trimesh(vertices, indices);
         } else {
-            // Absolute fallback: create a box with minimum safe dimensions
             const minSize = 0.1;
             shape = new CANNON.Box(new CANNON.Vec3(
                 Math.max(minSize, worldScale.x/2),
@@ -591,9 +532,6 @@ let shape;
             ));
         }
 
-        // Calculate mass based on volume (scale) and density.
-        // If density is 0, mass is 0, making the object static (weightless).
-        // We use a multiplier of 0.02 so that a density of 10 = 0.2 mass multiplier.
         const density = (obj.userData.density !== undefined) ? obj.userData.density : 10;
         const mass = isAnchored ? 0 : (worldScale.x * worldScale.y * worldScale.z) * (density * 0.02);
 
@@ -602,11 +540,11 @@ let shape;
             position: new CANNON.Vec3(worldPos.x, worldPos.y, worldPos.z),
             quaternion: new CANNON.Quaternion(worldQuat.x, worldQuat.y, worldQuat.z, worldQuat.w),
             shape: shape,
-            material: groundMaterial // Everything else is "ground"
+            material: groundMaterial
         });
 
         if (mass > 0) {
-            body.linearDamping = 0.05; // Reduces jittering/skittishness for light objects
+            body.linearDamping = 0.05;
             body.angularDamping = 0.05;
         }
 
@@ -620,9 +558,8 @@ function createAvatar() {
     const mat = new THREE.MeshStandardMaterial({ color: 0xe0e0e0 }); 
     const addShadows = (mesh) => { mesh.castShadow = true; mesh.receiveShadow = true; return mesh; };
 
-    // Total height is ~3.6 units. We center everything so (0,0,0) is the middle of the torso.
     const head = addShadows(new THREE.Mesh(new THREE.SphereGeometry(0.6, 16, 16), mat)); 
-    head.position.y = 1.2; // Top of head at 1.8
+    head.position.y = 1.2;
     state.playerGroup.add(head);
 
     const torso = addShadows(new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.2, 0.6), mat)); 
@@ -639,14 +576,14 @@ function createAvatar() {
     state.playerGroup.add(rightArm);
 
     const leftLeg = addShadows(new THREE.Mesh(limbGeo, mat)); 
-    leftLeg.position.set(-0.3, -1.2, 0); // Bottom of feet at -1.8
+    leftLeg.position.set(-0.3, -1.2, 0);
     state.playerGroup.add(leftLeg);
 
     const rightLeg = addShadows(new THREE.Mesh(limbGeo, mat)); 
     rightLeg.position.set(0.3, -1.2, 0); 
     state.playerGroup.add(rightLeg);
 
-    state.playerGroup.position.set(0, 5, 0); // Spawn slightly higher
+    state.playerGroup.position.set(0, 5, 0);
     scene.add(state.playerGroup);
 }
 
@@ -674,29 +611,24 @@ function togglePlayTest() {
         createAvatar();
         setCameraIndicatorVisibility(false);
 
-        // --- PLAYER SPAWN LOGIC ---
         const spawns = state.selectableObjects.filter(obj => {
             if (!obj.userData.isPlayerSpawn) return false;
             const itemId = findItemIdForObject(obj);
             const item = explorerHierarchy.findItemById(itemId);
             return item && item.properties && item.properties.enabled !== false;
         });
-        let spawnPos = new THREE.Vector3(0, 10, 0); // Default fallback
+        let spawnPos = new THREE.Vector3(0, 10, 0);
 
         if (spawns.length > 0) {
-            // Pick a random spawn location if multiple exist
             const spawn = spawns[Math.floor(Math.random() * spawns.length)];
             spawn.updateMatrixWorld();
             
-            // Calculate a random point on the top surface
-            // We use 0.5 as local Y because the box geometry is 1 unit tall centered at 0
             const localRandomPoint = new THREE.Vector3(
                 (Math.random() - 0.5), 
                 0.5, 
                 (Math.random() - 0.5)
             );
             
-            // Transform local point to world space and add player half-height (1.8)
             spawnPos.copy(localRandomPoint.applyMatrix4(spawn.matrixWorld));
             spawnPos.y += 1.8; 
         }
@@ -707,10 +639,8 @@ function togglePlayTest() {
         btn.innerText = "Play Test";
         btn.style.background = "#2d5a3f";
         
-        // CRITICAL FIX: Clear selection FIRST to detach objects from selectionGroup
         clearSelection();
         
-        // Reset all objects to their original positions
         state.selectableObjects.forEach(obj => {
             if (obj && obj.userData.originalTransform) {
                 obj.position.copy(obj.userData.originalTransform.position);
@@ -720,10 +650,8 @@ function togglePlayTest() {
             }
         });
         
-        // Restore camera indicators for editor mode
         setCameraIndicatorVisibility(true);
 
-        // Clean up physics properly
         physicsBodies.clear();
         if (physicsWorld) {
             physicsWorld.bodies.forEach(body => physicsWorld.removeBody(body));
@@ -732,7 +660,6 @@ function togglePlayTest() {
         if (state.playerGroup && scene) scene.remove(state.playerGroup);
         state.playerGroup = null;
         
-        // Restore editor camera and Up vector
         camera.up.set(0, 1, 0);
         camera.position.copy(state.editorCameraTransform.position);
         camera.rotation.set(state.editorCameraTransform.rotation.x, state.editorCameraTransform.rotation.y, state.editorCameraTransform.rotation.z);
@@ -765,16 +692,14 @@ const clock = new THREE.Clock();
 function animate() {
     requestAnimationFrame(animate);
     const isTyping = document.activeElement.tagName === 'INPUT';
-    const dt = Math.min(0.05, clock.getDelta()); // Cap delta to prevent huge jumps
+    const dt = Math.min(0.05, clock.getDelta());
 
-    // Update active particle systems every frame regardless of state
     updateParticles(dt);
 
     if (state.isPlayTesting && state.playerGroup && state.playerPhysicsBody) {
         
-        // --- 1. SYNC ANCHORED OBJECTS (Real-time Pushing) ---
         physicsBodies.forEach((body, mesh) => {
-            if (body.mass === 0) { // Anchored/Static objects
+            if (body.mass === 0) {
                 mesh.updateMatrixWorld();
                 const worldPos = new THREE.Vector3();
                 const worldQuat = new THREE.Quaternion();
@@ -785,14 +710,11 @@ function animate() {
             }
         });
 
-        // --- 2. PLAYER MOVEMENT (Omni-directional) ---
         const localUp = new THREE.Vector3().copy(state.gravityDirection).multiplyScalar(-1).normalize();
         const cannonUp = new CANNON.Vec3(localUp.x, localUp.y, localUp.z);
 
-        // Calculate movement basis relative to camera and gravity
         const camForward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
         let forward = camForward.clone().projectOnPlane(localUp).normalize();
-        // Fallback if looking straight at gravity
         if (forward.lengthSq() < 0.01) {
             const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
             forward = camUp.projectOnPlane(localUp).normalize();
@@ -803,7 +725,7 @@ function animate() {
         if (!isTyping) {
             if (keys['KeyW']) moveVec.add(forward);
             if (keys['KeyS']) moveVec.sub(forward);
-            if (keys['KeyA']) moveVec.sub(right); // Fixed: Left/Right were flipped
+            if (keys['KeyA']) moveVec.sub(right);
             if (keys['KeyD']) moveVec.add(right);
         }
 
@@ -812,28 +734,24 @@ function animate() {
 
         if (moveVec.length() > 0) {
             moveVec.normalize().multiplyScalar(moveSpeed * 65);
-            // Apply movement while preserving gravity-induced vertical velocity
             state.playerPhysicsBody.velocity.set(
                 moveVec.x + localUp.x * verticalVelocity,
                 moveVec.y + localUp.y * verticalVelocity,
                 moveVec.z + localUp.z * verticalVelocity
             );
 
-            // --- PLAYER VISUAL ROTATION ---
             const lookTarget = state.playerGroup.position.clone().add(moveVec);
             const targetQuat = new THREE.Quaternion();
             const m = new THREE.Matrix4().lookAt(state.playerGroup.position, lookTarget, localUp);
             targetQuat.setFromRotationMatrix(m);
             state.playerGroup.quaternion.slerp(targetQuat, 0.2);
         } else {
-            // Maintain only vertical velocity when not moving
             state.playerPhysicsBody.velocity.set(
                 localUp.x * verticalVelocity,
                 localUp.y * verticalVelocity,
                 localUp.z * verticalVelocity
             );
             
-            // Align "Up" with anti-gravity while preserving current facing direction
             const currentQuat = state.playerGroup.quaternion.clone();
             const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(currentQuat).projectOnPlane(localUp).normalize();
             if (fwd.lengthSq() > 0.01) {
@@ -844,8 +762,6 @@ function animate() {
             }
         }
 
-        // --- 3. GROUND CHECK (Updated for Tall Box) ---
-        // Raycast in the direction of gravity to detect ground
         const from = state.playerPhysicsBody.position;
         const to = new CANNON.Vec3(
             from.x + state.gravityDirection.x * 1.9,
@@ -859,13 +775,11 @@ function animate() {
         if (keys['Space'] && state.isGrounded && !isTyping) {
             const jumpImpulse = jumpStrength * 75;
             
-            // Clear existing vertical velocity before jumping to ensure consistent height
             const vDot = state.playerPhysicsBody.velocity.dot(cannonUp);
             state.playerPhysicsBody.velocity.x -= cannonUp.x * vDot;
             state.playerPhysicsBody.velocity.y -= cannonUp.y * vDot;
             state.playerPhysicsBody.velocity.z -= cannonUp.z * vDot;
 
-            // Apply the jump impulse opposite to gravity
             state.playerPhysicsBody.velocity.x += localUp.x * jumpImpulse;
             state.playerPhysicsBody.velocity.y += localUp.y * jumpImpulse;
             state.playerPhysicsBody.velocity.z += localUp.z * jumpImpulse;
@@ -873,7 +787,6 @@ function animate() {
             state.isGrounded = false;
         }
 
-        // --- 4. STEP & SYNC ---
         if (physicsWorld && state.playerPhysicsBody) {
             physicsWorld.gravity.set(
                 state.gravityDirection.x * state.gravityStrength,
@@ -891,14 +804,11 @@ function animate() {
             });
         }
 
-        // --- 5. CAMERA (Gravity-Aligned) ---
-        // Calculate a rotation that aligns World-Up to our Local-Up
         const gravityAlignQuat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), localUp);
         
         const enabledCam = findEnabledCamera(explorerHierarchy.items);
 
         if (enabledCam && enabledCam.objectRef) {
-            // Override with Camera Object
             const camObj = enabledCam.objectRef;
             camera.position.copy(camObj.getWorldPosition(new THREE.Vector3()));
             camera.quaternion.copy(camObj.getWorldQuaternion(new THREE.Quaternion()));
@@ -907,39 +817,33 @@ function animate() {
             camera.far = enabledCam.properties.far || 1000;
             camera.updateProjectionMatrix();
         } else if (state.playerGroup) {
-            // Standard Avatar Camera
             const headPos = new THREE.Vector3(0, 1.2, 0)
                 .applyQuaternion(state.playerGroup.quaternion)
                 .add(state.playerGroup.position);
 
-        if (state.isFirstPerson) {
-            camera.position.copy(headPos);
-            
-            // Combine Gravity Alignment with user Yaw and Pitch
-            const yawQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), state.yaw);
-            const pitchQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), state.pitch);
-            
-            camera.quaternion.copy(gravityAlignQuat).multiply(yawQuat).multiply(pitchQuat);
-        } else {
-            // Keep camera Up vector consistent with gravity for lookAt stability
-            camera.up.copy(localUp);
+            if (state.isFirstPerson) {
+                camera.position.copy(headPos);
+                
+                const yawQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), state.yaw);
+                const pitchQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), state.pitch);
+                
+                camera.quaternion.copy(gravityAlignQuat).multiply(yawQuat).multiply(pitchQuat);
+            } else {
+                camera.up.copy(localUp);
 
-            // Calculate orbital position based on yaw/pitch in local gravity frame
-            const localOffset = new THREE.Vector3(
-                state.cameraZoom * Math.sin(state.yaw) * Math.cos(state.pitch),
-                state.cameraZoom * Math.sin(state.pitch),
-                state.cameraZoom * Math.cos(state.yaw) * Math.cos(state.pitch)
-            );
-            
-            // Rotate the offset into world space relative to gravity and apply
-            const worldOffset = localOffset.applyQuaternion(gravityAlignQuat);
-            camera.position.copy(headPos.clone().add(worldOffset));
-            camera.lookAt(headPos);
-        }
+                const localOffset = new THREE.Vector3(
+                    state.cameraZoom * Math.sin(state.yaw) * Math.cos(state.pitch),
+                    state.cameraZoom * Math.sin(state.pitch),
+                    state.cameraZoom * Math.cos(state.yaw) * Math.cos(state.pitch)
+                );
+                
+                const worldOffset = localOffset.applyQuaternion(gravityAlignQuat);
+                camera.position.copy(headPos.clone().add(worldOffset));
+                camera.lookAt(headPos);
+            }
         }
 
     } else if (!isTyping) {
-        // Editor Camera
         const eMove = new THREE.Vector3();
         if (keys['KeyW']) eMove.z -= 1; if (keys['KeyS']) eMove.z += 1;
         if (keys['KeyA']) eMove.x -= 1; if (keys['KeyD']) eMove.x += 1;
@@ -947,37 +851,27 @@ function animate() {
         camera.rotation.set(state.pitch, state.yaw, 0, 'YXZ');
     }
 
-    // Constantly update scale gizmo to account for camera movement and zooming
     if (state.currentMode === 'scale' && !state.isPlayTesting) {
         updateScaleHandles();
     }
 
-    // Keep shadows centered around the user's camera view
     updateSunShadowCameraToCameraView();
 
-    // Manage light budget for performance and stability
     manageLightPriority();
     updateSoundAttenuation();
 
-    // --- SUN RAYS UPDATE ---
     if (godRaysPass && godRaysPass.enabled) {
-        // Project the physical sun disk, not the light source position
         const sunProj = sunDisk.position.clone().project(camera);
         
-        // z < 1 means the sun is in front of the camera's far plane
-        // We also check if it's within a reasonable range to avoid "inverted" rays when looking away
         if (sunProj.z < 1 && sunProj.z > -1) {
             godRaysPass.uniforms.sunPosition.value.set((sunProj.x + 1) / 2, (sunProj.y + 1) / 2);
         }
     }
 
-    // --- SSR RAYTRACING UPDATE ---
-    // Renders normals, depth, and masks to trace rays in screen space
     renderSSRPrepass();
 
     composer.render();
 
-    // Render UI on top
     renderer.autoClear = false;
     renderer.clearDepth();
     renderer.render(uiScene, uiCamera);
